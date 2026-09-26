@@ -162,4 +162,14 @@
     android:translationY="-23dp"
     android:translationX="-23dp"
     android:translationZ="1dp"/>
+
+  <!-- greenWave: speed advice for the green wave (bicycle routes only). -->
+  <dev.greenwave.maps.GreenWavePanel
+    android:id="@+id/nav_green_wave"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:layout_marginTop="36dp"
+    app:layout_constraintEnd_toEndOf="@id/nav_next_turn_container"
+    app:layout_constraintStart_toStartOf="@id/nav_next_turn_container"
+    app:layout_constraintTop_toBottomOf="@id/nav_current_speed"/>
 </androidx.constraintlayout.widget.ConstraintLayout>

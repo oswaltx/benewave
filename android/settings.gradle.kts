@@ -19,3 +19,4 @@ dependencyResolutionManagement {
 rootProject.name = "CoMaps"
 include(":app")
 include(":sdk")
+include(":greenwave")

@@ -358,6 +358,7 @@ androidComponents {
 
 dependencies {
     implementation(project(":sdk"))
+    implementation(project(":greenwave")) // greenWave logic
     coreLibraryDesugaring(libs.android.tools.desugar)
 
     // Google Play Location Services
