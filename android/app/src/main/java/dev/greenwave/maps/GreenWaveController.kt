@@ -52,6 +52,9 @@ object GreenWaveController {
     /** Measured rhythms below this confidence are not trusted over the placeholder. */
     private const val MIN_CONFIDENCE = 0.5
 
+    /** Waits before re-trying a failed Overpass lookup on the same route. */
+    private val RETRY_DELAYS_MS = longArrayOf(30_000, 60_000, 120_000, 300_000)
+
     enum class LightsStatus { NO_ROUTE, LOADING, READY, FAILED }
 
     data class State(
@@ -71,6 +74,7 @@ object GreenWaveController {
     private val knownSignals = LinkedHashSet<LatLng>()
     private val coveredPaths = mutableListOf<List<LatLng>>()
     private var requestedRevision = -1
+    private var failedAttempts = 0
 
     // Worker-only state for learning.
     private var store: StopEventStore? = null
@@ -150,6 +154,7 @@ object GreenWaveController {
         }
         if (geometry.mRevision == requestedRevision) return
         requestedRevision = geometry.mRevision
+        failedAttempts = 0
         val path = geometry.mJunctions.map { LatLng(latitude = it.mLat, longitude = it.mLon) }
         route = Route(path = path, trafficLights = emptyList())
         lightsStatus = LightsStatus.LOADING
@@ -176,7 +181,24 @@ object GreenWaveController {
             Log.w(TAG, "traffic light lookup failed", e)
             LightsStatus.FAILED
         }
-        main.post { if (revision == requestedRevision) lightsStatus = status }
+        main.post {
+            if (revision != requestedRevision) return@post
+            lightsStatus = status
+            if (status == LightsStatus.FAILED) scheduleRetry(path, revision)
+        }
+    }
+
+    /** Main thread: retry a failed lookup while the same route is still active. */
+    private fun scheduleRetry(path: List<LatLng>, revision: Int) {
+        val delay = RETRY_DELAYS_MS.getOrNull(failedAttempts) ?: RETRY_DELAYS_MS.last()
+        failedAttempts++
+        Log.i(TAG, "retry traffic light lookup in ${delay / 1000}s (attempt $failedAttempts)")
+        main.postDelayed({
+            if (revision == requestedRevision && lightsStatus == LightsStatus.FAILED) {
+                lightsStatus = LightsStatus.LOADING
+                worker.execute { loadLights(path, revision) }
+            }
+        }, delay)
     }
 
     /** Worker: combine current light positions with what has been learned so far. */
