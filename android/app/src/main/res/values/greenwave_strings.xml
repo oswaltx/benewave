@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- greenWave: strings added by the fork (kept out of CoMaps' translated strings.xml). -->
+<resources>
+  <string name="greenwave_menu" translatable="false">greenWave</string>
+</resources>

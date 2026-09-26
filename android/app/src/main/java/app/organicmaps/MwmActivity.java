@@ -2533,6 +2533,9 @@ public class MwmActivity extends BaseMwmFragmentActivity
       if (!mDonatesUrl.isEmpty())
         items.add(new MenuBottomSheetItem(R.string.donate, R.drawable.ic_donate, this::onDonateOptionSelected));
 
+      items.add(new MenuBottomSheetItem(R.string.greenwave_menu, R.drawable.ic_logo_monochrome_settings, // greenWave
+                                        () -> dev.greenwave.maps.GreenWaveDialogs.INSTANCE.showMenu(this)));
+
       if (!BUTTON_SETTINGS_CODE.equals(activeLeftButton))
         items.add(new MenuBottomSheetItem(R.string.settings, R.drawable.ic_settings, this::onSettingsOptionSelected));
 

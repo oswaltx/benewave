@@ -63,6 +63,42 @@ internal object GreenWaveDialogs {
             .show()
     }
 
+    /** Entry from CoMaps' main menu. */
+    fun showMenu(activity: Activity) {
+        MaterialAlertDialogBuilder(activity)
+            .setTitle("greenWave")
+            .setItems(arrayOf("Ampeldaten", "Einstellungen")) { _, which ->
+                if (which == 0) showLightData(activity) else showSettings(activity)
+            }
+            .show()
+    }
+
+    /** Everything learned so far, one line per light. */
+    fun showLightData(activity: Activity) {
+        GreenWaveController.lightStats { stats ->
+            if (activity.isFinishing || activity.isDestroyed) return@lightStats
+            val learned = stats.count { it.trusted }
+            val rows = stats.map { s ->
+                val where = "%.5f, %.5f".format(s.position.latitude, s.position.longitude)
+                val what = when {
+                    s.trusted -> "Zyklus ${s.cycleSec} s, grün ${s.greenSec} s, sicher ${(s.confidence!! * 100).roundToInt()} %"
+                    s.cycleSec != null -> "vorläufig ${s.cycleSec} s (sicher ${(s.confidence!! * 100).roundToInt()} %)"
+                    s.stops > 0 -> "noch zu wenig Stopps"
+                    else -> "noch keine Stopps"
+                }
+                "${if (s.trusted) "●" else "○"} $what · ${s.stops} Stopps\n$where"
+            }
+            MaterialAlertDialogBuilder(activity)
+                .setTitle("Ampeldaten: $learned von ${stats.size} gelernt")
+                .apply {
+                    if (rows.isEmpty()) setMessage("Noch keine Ampeln. Starte eine Navigation mit dem Fahrrad-Profil.")
+                    else setItems(rows.toTypedArray(), null)
+                }
+                .setPositiveButton("OK", null)
+                .show()
+        }
+    }
+
     /** Opened by a long press on the navigation panel. */
     fun showSettings(context: Context) {
         val settings = GreenWaveController.settings() ?: return
@@ -78,6 +114,16 @@ internal object GreenWaveDialogs {
             addView(TextView(context).apply { text = "  bis  " })
             addView(max, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         })
+
+        val logging = SwitchCompat(context).apply {
+            text = "Fahrdaten aufzeichnen"
+            isChecked = settings.loggingEnabled
+        }
+        content.addView(logging)
+        content.addView(text(context,
+            "Stopps und Fahrten während der Fahrrad-Navigation, nur auf diesem Gerät. Daraus lernt die App " +
+                "die Ampelzyklen. Bisher: ${GreenWaveController.loggedStops} Stopps, " +
+                "${GreenWaveController.loggedRides} Fahrten.", small = true))
 
         val current = GreenWaveController.speedRange
         val auto = SwitchCompat(context).apply {
@@ -108,6 +154,7 @@ internal object GreenWaveDialogs {
                 if (lo != null && hi != null && lo >= 5 && hi <= 45 && hi - lo >= 3) {
                     settings.manualRange = SpeedRangeKmh(min = lo, max = hi)
                 }
+                settings.loggingEnabled = logging.isChecked
                 settings.autoProfile = auto.isChecked
                 settings.runsRed = red.isChecked
             }

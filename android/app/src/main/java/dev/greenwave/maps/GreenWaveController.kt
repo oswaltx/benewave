@@ -8,6 +8,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import app.organicmaps.sdk.Framework
 import app.organicmaps.sdk.Router
 import app.organicmaps.sdk.routing.RoutingController
 import dev.greenwave.shared.algorithm.SpeedRangeKmh
@@ -79,6 +80,7 @@ object GreenWaveController {
     private var lights: List<TrafficLight> = emptyList()
     private var learnedPositions: Set<LatLng> = emptySet()
     private var rideLog: RideLog? = null
+    private var knownLights: KnownLights? = null
     private var ride: RideBuilder? = null
 
     /** Worker-only accumulator for the bicycle navigation in progress. */
@@ -95,6 +97,12 @@ object GreenWaveController {
 
     private var settings: GreenWaveSettings? = null
     @Volatile private var profileRange: SpeedRangeKmh? = null
+
+    /** For the settings dialog: how much has been logged on this device. */
+    @Volatile var loggedStops = 0
+        private set
+    @Volatile var loggedRides = 0
+        private set
     private var host: WeakReference<Context>? = null
 
     private val worker = Executors.newSingleThreadExecutor()
@@ -117,8 +125,12 @@ object GreenWaveController {
         val appContext = context.applicationContext
         settings = GreenWaveSettings(appContext)
         worker.execute {
-            store = StopEventStore(appContext)
-            rideLog = RideLog(appContext).also { profileRange = it.profileRange() }
+            store = StopEventStore(appContext).also { loggedStops = it.all().size }
+            knownLights = KnownLights(appContext)
+            rideLog = RideLog(appContext).also {
+                profileRange = it.profileRange()
+                loggedRides = it.all().size
+            }
         }
         RoutingController.get().addRouteChangedListener { onRouteChanged() }
         onRouteChanged()
@@ -130,6 +142,7 @@ object GreenWaveController {
         if (geometry.pointCount < 2 || controller.lastRouterType != Router.Bicycle) {
             val wasActive = route != null
             route = null
+            if (wasActive) Framework.nativeClearGreenWaveMarks()
             lightsStatus = LightsStatus.NO_ROUTE
             requestedRevision = -1
             if (wasActive) worker.execute { finishRide() }
@@ -155,6 +168,7 @@ object GreenWaveController {
             }
             lightsPath = path
             lightPositions = TrafficLightsAlongRoute.select(path, knownSignals.toList())
+            knownLights?.addAll(lightPositions)
             publishRoute(revision)
             Log.i(TAG, "route rev $revision: ${lightPositions.size} traffic lights")
             LightsStatus.READY
@@ -192,6 +206,7 @@ object GreenWaveController {
             if (revision == requestedRevision) {
                 route = Route(path = path, trafficLights = lights)
                 learnedCount = count
+                showMarks(lights, learnedSet)
             }
         }
     }
@@ -201,7 +216,7 @@ object GreenWaveController {
      * screen off). Feeds the stop detector on bicycle routes only.
      */
     fun onRideLocation(location: Location) {
-        if (route == null) return
+        if (route == null || settings?.loggingEnabled == false) return
         val update = location.toUpdate()
         val revision = requestedRevision
         worker.execute {
@@ -209,6 +224,7 @@ object GreenWaveController {
             val event = stopDetector.onUpdate(update) ?: return@execute
             val log = store ?: return@execute
             log.append(event)
+            loggedStops = log.all().size
             Log.i(TAG, "stop ${event.durationSec}s at ${event.position}")
             if (lightPositions.isNotEmpty()) publishRoute(revision)
         }
@@ -261,9 +277,42 @@ object GreenWaveController {
         )
         val log = rideLog ?: return
         log.add(entry)
+        loggedRides = log.all().size
         profileRange = log.profileRange()
         Log.i(TAG, "ride logged: ${entry.passedLights.size} lights, ${entry.redPasses} red passes")
         main.post { hostActivity()?.let { GreenWaveDialogs.showRating(it, entry) } }
+    }
+
+    /** One row of the "Ampeldaten" list. */
+    data class LightStats(
+        val position: LatLng,
+        val stops: Int,
+        val cycleSec: Int?,
+        val greenSec: Int?,
+        val confidence: Double?,
+        val trusted: Boolean,
+    )
+
+    /** All lights ever on a route with what has been learned about them; [onResult] runs on main. */
+    fun lightStats(onResult: (List<LightStats>) -> Unit) {
+        worker.execute {
+            val positions = knownLights?.all().orEmpty()
+            val events = store?.all().orEmpty()
+            val grouped = events.groupBy { StopEventMatcher.match(it.position, positions) }
+            val stats = positions.map { position ->
+                val stops = grouped[position].orEmpty()
+                val estimate = TrafficLightRhythmEstimator.estimate(stops)
+                LightStats(
+                    position = position,
+                    stops = stops.size,
+                    cycleSec = estimate?.cycleLengthSec,
+                    greenSec = estimate?.greenDurationSec,
+                    confidence = estimate?.confidence,
+                    trusted = estimate != null && estimate.confidence >= MIN_CONFIDENCE,
+                )
+            }.sortedWith(compareByDescending<LightStats> { it.trusted }.thenByDescending { it.stops })
+            main.post { onResult(stats) }
+        }
     }
 
     /** Worker-side persistence for the rating dialog. */
@@ -316,6 +365,16 @@ object GreenWaveController {
         speedKmh = if (hasSpeed()) speed * 3.6 else 0.0,
         bearingDegrees = if (hasBearing()) bearing else null,
     )
+
+    /** Main thread: coloured dots for the route's lights (green = learned cycle). */
+    private fun showMarks(lights: List<TrafficLight>, learned: Set<LatLng>) {
+        val coords = DoubleArray(lights.size * 2)
+        lights.forEachIndexed { i, light ->
+            coords[2 * i] = light.position.latitude
+            coords[2 * i + 1] = light.position.longitude
+        }
+        Framework.nativeSetGreenWaveMarks(coords, BooleanArray(lights.size) { lights[it].position in learned })
+    }
 
     private fun needsQuery(path: List<LatLng>): Boolean {
         if (coveredPaths.isEmpty()) return true

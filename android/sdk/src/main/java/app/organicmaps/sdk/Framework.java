@@ -222,6 +222,10 @@ public class Framework
   /// @param[in] maxDistM Max distance between points in meters.
   public static native JunctionInfo[] nativeGetRouteJunctionPoints(double maxDistM);
 
+  // greenWave: traffic lights along the route as coloured dots (green = learned cycle).
+  public static native void nativeSetGreenWaveMarks(double[] latLons, boolean[] learned);
+  public static native void nativeClearGreenWaveMarks();
+
   @Nullable
   public static native final int[] nativeGenerateRouteAltitudeChartBits(int width, int height,
                                                                         RouteAltitudeLimits routeAltitudeLimits);

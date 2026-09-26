@@ -22,6 +22,11 @@ internal class GreenWaveSettings(context: Context) {
         get() = prefs.getBoolean(KEY_AUTO, false)
         set(value) = prefs.edit().putBoolean(KEY_AUTO, value).apply()
 
+    /** Log stops and rides while navigating by bicycle (the data the cycles are learned from). */
+    var loggingEnabled: Boolean
+        get() = prefs.getBoolean(KEY_LOGGING, true)
+        set(value) = prefs.edit().putBoolean(KEY_LOGGING, value).apply()
+
     /**
      * Rider says they regularly cross on red. Their rides are flagged so they
      * never feed shared timing data (crowdsourcing) — a red-runner's
@@ -36,6 +41,7 @@ internal class GreenWaveSettings(context: Context) {
         const val KEY_MAX = "range_max_kmh"
         const val KEY_AUTO = "auto_profile"
         const val KEY_RUNS_RED = "runs_red"
+        const val KEY_LOGGING = "logging_enabled"
         const val DEFAULT_MIN = 10f
         const val DEFAULT_MAX = 25f
     }
