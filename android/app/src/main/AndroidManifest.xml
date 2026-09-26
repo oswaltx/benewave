@@ -500,6 +500,12 @@
         android:enabled="true"
         android:stopWithTask="false"/>
 
+    <!-- greenWave: tracking mode without navigation, started from the greenWave menu. -->
+    <service
+        android:name="dev.greenwave.maps.GreenWaveTrackingService"
+        android:foregroundServiceType="location"
+        android:exported="false"/>
+
     <service android:name=".location.TrackRecordingService"
       android:foregroundServiceType="location"
       android:exported="false"

@@ -2,6 +2,7 @@ package dev.greenwave.maps
 
 import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.text.InputType
 import android.util.TypedValue
 import android.view.Gravity
@@ -10,9 +11,12 @@ import android.widget.LinearLayout
 import android.widget.RatingBar
 import android.widget.TextView
 import androidx.appcompat.widget.SwitchCompat
+import androidx.core.content.FileProvider
+import app.organicmaps.BuildConfig
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import dev.greenwave.shared.algorithm.SpeedRangeKmh
 import dev.greenwave.shared.geo.LatLng
+import java.io.File
 import kotlin.math.roundToInt
 
 /** greenWave's dialogs, built in code so CoMaps' layouts stay untouched. */
@@ -65,12 +69,43 @@ internal object GreenWaveDialogs {
 
     /** Entry from CoMaps' main menu. */
     fun showMenu(activity: Activity) {
+        val tracking = GreenWaveTrackingService.running
+        val tracks = TrackFile.all(activity)
+        val items = mutableListOf(
+            (if (tracking) "Tracking beenden" else "Tracking starten") to {
+                if (tracking) GreenWaveTrackingService.stop(activity) else confirmTracking(activity)
+            },
+            "Ampeldaten" to { showLightData(activity) },
+            "Einstellungen" to { showSettings(activity) },
+        )
+        if (tracks.isNotEmpty()) items.add("Aufzeichnungen teilen (${tracks.size})" to { shareTracks(activity, tracks) })
         MaterialAlertDialogBuilder(activity)
             .setTitle("greenWave")
-            .setItems(arrayOf("Ampeldaten", "Einstellungen")) { _, which ->
-                if (which == 0) showLightData(activity) else showSettings(activity)
-            }
+            .setItems(items.map { it.first }.toTypedArray()) { _, which -> items[which].second() }
             .show()
+    }
+
+    private fun confirmTracking(activity: Activity) {
+        MaterialAlertDialogBuilder(activity)
+            .setTitle("Tracking starten?")
+            .setMessage(
+                "Zeichnet deine Fahrt auf, auch ohne Navigation und bei ausgeschaltetem Display: GPS-Spur, " +
+                    "Stopps an Ampeln und Tempo. Die Daten bleiben auf diesem Gerät. Beenden über das Menü " +
+                    "oder die Benachrichtigung.",
+            )
+            .setPositiveButton("Starten") { _, _ -> GreenWaveTrackingService.start(activity) }
+            .setNegativeButton("Abbrechen", null)
+            .show()
+    }
+
+    /** The raw GPS tracks (CSV) via the share sheet, e.g. to a file manager or messenger. */
+    private fun shareTracks(activity: Activity, tracks: List<File>) {
+        val uris = ArrayList(tracks.map { FileProvider.getUriForFile(activity, BuildConfig.FILE_PROVIDER_AUTHORITY, it) })
+        val intent = Intent(Intent.ACTION_SEND_MULTIPLE)
+            .setType("text/csv")
+            .putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        activity.startActivity(Intent.createChooser(intent, "Aufzeichnungen teilen"))
     }
 
     /** Everything learned so far, one line per light. */
@@ -91,7 +126,7 @@ internal object GreenWaveDialogs {
             MaterialAlertDialogBuilder(activity)
                 .setTitle("Ampeldaten: $learned von ${stats.size} gelernt")
                 .apply {
-                    if (rows.isEmpty()) setMessage("Noch keine Ampeln. Starte eine Navigation mit dem Fahrrad-Profil.")
+                    if (rows.isEmpty()) setMessage("Noch keine Ampeln. Starte eine Navigation mit dem Fahrrad-Profil oder das Tracking.")
                     else setItems(rows.toTypedArray(), null)
                 }
                 .setPositiveButton("OK", null)

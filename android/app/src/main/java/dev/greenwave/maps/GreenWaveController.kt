@@ -15,6 +15,7 @@ import dev.greenwave.shared.algorithm.SpeedRangeKmh
 import dev.greenwave.shared.data.RandomTrafficTimingGenerator
 import dev.greenwave.shared.geo.LatLng
 import dev.greenwave.shared.geo.distanceAlongPath
+import dev.greenwave.shared.geo.distanceMeters
 import dev.greenwave.shared.geo.distanceToPath
 import dev.greenwave.shared.guidance.RideGuidance
 import dev.greenwave.shared.guidance.RideGuidanceCalculator
@@ -100,6 +101,11 @@ object GreenWaveController {
     private const val MIN_RIDE_SEC = 120L
 
     private var settings: GreenWaveSettings? = null
+
+    // Tracking mode (GreenWaveTrackingService): worker-only except the counters.
+    private var track: TrackFile? = null
+    @Volatile var trackingStops = 0
+        private set
     @Volatile private var profileRange: SpeedRangeKmh? = null
 
     /** For the settings dialog: how much has been logged on this device. */
@@ -283,7 +289,7 @@ object GreenWaveController {
     }
 
     /** Worker: navigation ended — log the ride and ask for a rating. */
-    private fun finishRide() {
+    private fun finishRide(askRating: Boolean = true) {
         val done = ride ?: return
         ride = null
         lights = emptyList()
@@ -302,7 +308,7 @@ object GreenWaveController {
         loggedRides = log.all().size
         profileRange = log.profileRange()
         Log.i(TAG, "ride logged: ${entry.passedLights.size} lights, ${entry.redPasses} red passes")
-        main.post { hostActivity()?.let { GreenWaveDialogs.showRating(it, entry) } }
+        if (askRating) main.post { hostActivity()?.let { GreenWaveDialogs.showRating(it, entry) } }
     }
 
     /** One row of the "Ampeldaten" list. */
@@ -334,6 +340,64 @@ object GreenWaveController {
                 )
             }.sortedWith(compareByDescending<LightStats> { it.trusted }.thenByDescending { it.stops })
             main.post { onResult(stats) }
+        }
+    }
+
+    /** Tracking mode started (from [GreenWaveTrackingService], main thread). */
+    fun startTracking(context: Context) {
+        init(context)
+        trackingStops = 0
+        val appContext = context.applicationContext
+        worker.execute {
+            track?.close()
+            track = TrackFile(appContext, System.currentTimeMillis() / 1000)
+            Log.i(TAG, "tracking started: ${track?.file?.name}")
+        }
+    }
+
+    /**
+     * A fix in tracking mode. While a bicycle navigation runs, NavigationService
+     * already feeds [onRideLocation]; here only the raw track is written then.
+     */
+    fun onTrackLocation(location: Location) {
+        val navigating = route != null
+        val update = location.toUpdate()
+        worker.execute {
+            track?.append(location)
+            if (navigating) return@execute
+            trackRide(update)
+            val event = stopDetector.onUpdate(update) ?: return@execute
+            store?.append(event)
+            loggedStops = store?.all()?.size ?: loggedStops
+            trackingStops++
+            Log.i(TAG, "tracking stop ${event.durationSec}s at ${event.position}")
+            lookUpLightNear(event.position)
+        }
+    }
+
+    /** Tracking mode ended: close the track, log the ride (no rating, there was no advice). */
+    fun stopTracking() {
+        worker.execute {
+            track?.close()
+            Log.i(TAG, "tracking stopped: ${track?.file?.name}")
+            track = null
+            if (route == null) finishRide(askRating = false)
+        }
+    }
+
+    /**
+     * Worker: without a route nobody asked Overpass about this spot, so look for
+     * a signal next to the stop and remember it; then the stop counts for that
+     * light in the "Ampeldaten" list and on later routes.
+     */
+    private fun lookUpLightNear(position: LatLng) {
+        val known = knownLights ?: return
+        if (known.all().any { distanceMeters(it, position) < TrafficLightsAlongRoute.MAX_DISTANCE_TO_ROUTE_METERS }) return
+        try {
+            val signals = OverpassClient.trafficSignals(TrafficLightsAlongRoute.overpassQuery(listOf(position, position)))
+            known.addAll(signals)
+        } catch (e: Exception) {
+            Log.w(TAG, "traffic light lookup at stop failed", e)
         }
     }
 
