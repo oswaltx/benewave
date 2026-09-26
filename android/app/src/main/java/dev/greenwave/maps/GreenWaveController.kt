@@ -106,6 +106,15 @@ object GreenWaveController {
     private var track: TrackFile? = null
     @Volatile var trackingStops = 0
         private set
+    /** Lights at which a stop was registered during this tracking. */
+    private val trackingLightSet = mutableSetOf<LatLng>()
+    @Volatile var trackingLights = 0
+        private set
+    /** Short line about the last stop, e.g. "Ampel registriert · 3 Stopps dort". */
+    @Volatile var trackingLastEvent: String? = null
+        private set
+    /** Set by [GreenWaveTrackingService]; runs on main after each stop. */
+    @Volatile var onTrackingEvent: (() -> Unit)? = null
     @Volatile private var profileRange: SpeedRangeKmh? = null
 
     /** For the settings dialog: how much has been logged on this device. */
@@ -347,9 +356,12 @@ object GreenWaveController {
     fun startTracking(context: Context) {
         init(context)
         trackingStops = 0
+        trackingLights = 0
+        trackingLastEvent = null
         val appContext = context.applicationContext
         worker.execute {
             track?.close()
+            trackingLightSet.clear()
             track = TrackFile(appContext, System.currentTimeMillis() / 1000)
             Log.i(TAG, "tracking started: ${track?.file?.name}")
         }
@@ -371,7 +383,17 @@ object GreenWaveController {
             loggedStops = store?.all()?.size ?: loggedStops
             trackingStops++
             Log.i(TAG, "tracking stop ${event.durationSec}s at ${event.position}")
-            lookUpLightNear(event.position)
+            val light = lookUpLightNear(event.position)
+            trackingLastEvent = if (light != null) {
+                trackingLightSet.add(light)
+                trackingLights = trackingLightSet.size
+                val stopsThere = store?.all().orEmpty()
+                    .count { StopEventMatcher.match(it.position, listOf(light)) == light }
+                "Ampel registriert (${event.durationSec} s) · $stopsThere Stopps dort"
+            } else {
+                "Stopp ohne Ampel (${event.durationSec} s)"
+            }
+            main.post { onTrackingEvent?.invoke() }
         }
     }
 
@@ -390,16 +412,22 @@ object GreenWaveController {
      * a signal next to the stop and remember it; then the stop counts for that
      * light in the "Ampeldaten" list and on later routes.
      */
-    private fun lookUpLightNear(position: LatLng) {
-        val known = knownLights ?: return
-        if (known.all().any { distanceMeters(it, position) < TrafficLightsAlongRoute.MAX_DISTANCE_TO_ROUTE_METERS }) return
+    private fun lookUpLightNear(position: LatLng): LatLng? {
+        val known = knownLights ?: return null
+        nearest(known.all(), position)?.let { return it }
         try {
             val signals = OverpassClient.trafficSignals(TrafficLightsAlongRoute.overpassQuery(listOf(position, position)))
             known.addAll(signals)
         } catch (e: Exception) {
             Log.w(TAG, "traffic light lookup at stop failed", e)
         }
+        return nearest(known.all(), position)
     }
+
+    private fun nearest(lights: List<LatLng>, position: LatLng): LatLng? = lights
+        .map { it to distanceMeters(it, position) }
+        .filter { it.second < TrafficLightsAlongRoute.MAX_DISTANCE_TO_ROUTE_METERS }
+        .minByOrNull { it.second }?.first
 
     /** Worker-side persistence for the rating dialog. */
     internal fun saveRating(ride: Ride, rating: Int?, wrongLights: List<LatLng>) {

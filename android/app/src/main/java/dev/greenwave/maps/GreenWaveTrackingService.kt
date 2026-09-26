@@ -60,6 +60,7 @@ class GreenWaveTrackingService : Service() {
         running = true
         startedAt = SystemClock.elapsedRealtime()
         GreenWaveController.startTracking(this)
+        GreenWaveController.onTrackingEvent = { notifyEvent() }
         requestUpdates()
         return START_NOT_STICKY
     }
@@ -81,19 +82,28 @@ class GreenWaveTrackingService : Service() {
         }
     }
 
+    /** A stop was registered: update right away and alert once, so the rider notices. */
+    private fun notifyEvent() {
+        if (!running) return
+        lastNotified = SystemClock.elapsedRealtime()
+        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(alert = true))
+        GreenWaveController.trackingLastEvent?.let { Toast.makeText(this, it, Toast.LENGTH_SHORT).show() }
+    }
+
     override fun onDestroy() {
+        GreenWaveController.onTrackingEvent = null
         (getSystemService(Context.LOCATION_SERVICE) as LocationManager).removeUpdates(listener)
         if (running) GreenWaveController.stopTracking()
         running = false
         super.onDestroy()
     }
 
-    private fun notification() = NotificationCompat.Builder(this, CHANNEL_ID)
+    private fun notification(alert: Boolean = false) = NotificationCompat.Builder(this, CHANNEL_ID)
         .setSmallIcon(R.drawable.ic_logo_small)
-        .setContentTitle("greenWave-Tracking läuft")
+        .setContentTitle(GreenWaveController.trackingLastEvent ?: "greenWave-Tracking läuft")
         .setContentText(summary())
         .setOngoing(true)
-        .setOnlyAlertOnce(true)
+        .setOnlyAlertOnce(!alert)
         .setCategory(NotificationCompat.CATEGORY_SERVICE)
         .setContentIntent(
             packageManager.getLaunchIntentForPackage(packageName)?.let {
@@ -112,7 +122,8 @@ class GreenWaveTrackingService : Service() {
     private fun summary(): String {
         val minutes = if (startedAt == 0L) 0 else (SystemClock.elapsedRealtime() - startedAt) / 60_000
         val km = String.format(Locale.GERMAN, "%.1f", distanceMeters / 1000)
-        return "$minutes min · $km km · ${GreenWaveController.trackingStops} Stopps"
+        return "$minutes min · $km km · ${GreenWaveController.trackingStops} Stopps · " +
+            "${GreenWaveController.trackingLights} Ampeln"
     }
 
     private fun createChannel() {
