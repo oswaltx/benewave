@@ -1,12 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- greenWave: tacho logo (cropped from the launcher foreground). -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="64dp"
     android:height="64dp"
-    android:viewportWidth="835"
-    android:viewportHeight="835">
+    android:viewportWidth="72"
+    android:viewportHeight="72">
+  <group android:translateX="-18" android:translateY="-18">
   <path
-      android:pathData="M698.5,141.1a20,20 0,0 1,30.8 -1.3A416,416 0,0 1,835 417.4a416,416 0,0 1,-93.3 263,20 20,0 0,1 -31.3,-0.6l-43,-56.6a20,20 0,0 1,-0.2 -24,307 307,0 0,0 59.3,-181.8c0,-74.2 -26.2,-142.3 -69.9,-195.6a20,20 0,0 1,-0.5 -24.8zM260.7,456.4a20,20 0,0 1,-7.7 -36.7l282,-177.4a20,20 0,0 1,29.9 22.7l-97,318.9a20,20 0,0 1,-37.5 2.2l-49.2,-111.5z"
-      android:fillColor="#BFFFFFFF"/>
-  <path
-      android:pathData="M626.3,753a20,20 0,0 1,-6.2 29.6A416,416 0,0 1,417.5 835,417.7 417.7,0 0,1 0,417.4 417.7,417.7 0,0 1,603.3 43.5a20,20 0,0 1,7 30l-42.4,55.8a20,20 0,0 1,-24.2 6.1,307 307,0 0,0 -126.2,-27 309,309 0,0 0,-309 309c0,170.6 138.5,309 309,309a307,307 0,0 0,141.6 -34.3,20 20,0 0,1 25.1,5.6z"
-      android:fillColor="#FFFFFFFF"/>
+          android:pathData="M30.52,75.25 A28,28 0 0 1 26.00,59.90"
+          android:strokeColor="#BFFFFFFF"
+          android:strokeWidth="8"
+          android:strokeLineCap="round" />
+      <path
+          android:pathData="M27.72,50.33 A28,28 0 0 1 37.31,37.52"
+          android:strokeColor="#BFFFFFFF"
+          android:strokeWidth="8"
+          android:strokeLineCap="round" />
+      <path
+          android:pathData="M46.00,33.17 A28,28 0 0 1 62.00,33.17"
+          android:strokeColor="#FFFFFFFF"
+          android:strokeWidth="8"
+          android:strokeLineCap="round" />
+      <path
+          android:pathData="M70.69,37.52 A28,28 0 0 1 80.28,50.33"
+          android:strokeColor="#BFFFFFFF"
+          android:strokeWidth="8"
+          android:strokeLineCap="round" />
+      <path
+          android:pathData="M82.00,59.90 A28,28 0 0 1 77.48,75.25"
+          android:strokeColor="#BFFFFFFF"
+          android:strokeWidth="8"
+          android:strokeLineCap="round" />
+      <path
+          android:pathData="M54,60 L54,41"
+          android:strokeColor="#FFFFFFFF"
+          android:strokeWidth="5"
+          android:strokeLineCap="round" />
+      <path
+          android:fillColor="#FFFFFFFF"
+          android:pathData="M48.5,60 a5.5,5.5 0 1,0 11.0,0 a5.5,5.5 0 1,0 -11.0,0" />
+  </group>
 </vector>
