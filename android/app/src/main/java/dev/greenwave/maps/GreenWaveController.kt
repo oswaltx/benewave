@@ -7,6 +7,7 @@ import android.location.Location
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import androidx.core.app.NotificationCompat
 import app.organicmaps.sdk.Router
 import app.organicmaps.sdk.routing.RoutingController
 import dev.greenwave.shared.algorithm.SpeedRangeKmh
@@ -16,6 +17,7 @@ import dev.greenwave.shared.geo.distanceAlongPath
 import dev.greenwave.shared.geo.distanceToPath
 import dev.greenwave.shared.guidance.RideGuidance
 import dev.greenwave.shared.guidance.RideGuidanceCalculator
+import dev.greenwave.shared.guidance.SpeedAdvice
 import dev.greenwave.shared.location.LocationUpdate
 import dev.greenwave.shared.model.Route
 import dev.greenwave.shared.model.TrafficLight
@@ -25,6 +27,7 @@ import dev.greenwave.shared.tracking.StopEventMatcher
 import dev.greenwave.shared.tracking.TrafficLightRhythmEstimator
 import java.lang.ref.WeakReference
 import java.util.concurrent.Executors
+import kotlin.math.roundToInt
 
 /**
  * Glue between CoMaps' routing and the greenWave logic: whenever a bicycle
@@ -274,6 +277,38 @@ object GreenWaveController {
         val activity = c as? Activity ?: return null
         return if (activity.isFinishing || activity.isDestroyed) null else activity
     }
+
+    /**
+     * Adds the speed advice to CoMaps' navigation notification (header line and
+     * colour), so it is visible on the lock screen and over other apps.
+     * [defaultColor] restores CoMaps' colour when there is no advice.
+     */
+    fun decorateNotification(builder: NotificationCompat.Builder, location: Location, defaultColor: Int) {
+        val guidance = state(location).guidance
+        val target = guidance?.targetSpeedKmh
+        if (guidance == null || target == null) {
+            builder.setSubText(null).setColor(defaultColor)
+            return
+        }
+        val arrow = when (guidance.advice) {
+            SpeedAdvice.FASTER -> " ▲"
+            SpeedAdvice.SLOWER -> " ▼"
+            SpeedAdvice.HOLD -> " ✓"
+            SpeedAdvice.NONE -> ""
+        }
+        val distance = guidance.nextLightDistanceMeters?.let { " · Ampel ${(it / 10).roundToInt() * 10} m" } ?: ""
+        builder.setSubText("${target.roundToInt()} km/h$arrow$distance")
+        builder.setColor(
+            when (guidance.advice) {
+                SpeedAdvice.HOLD -> NOTIFICATION_GREEN
+                SpeedAdvice.FASTER, SpeedAdvice.SLOWER -> NOTIFICATION_AMBER
+                SpeedAdvice.NONE -> defaultColor
+            },
+        )
+    }
+
+    private val NOTIFICATION_GREEN = 0xFF2E7D32.toInt()
+    private val NOTIFICATION_AMBER = 0xFFE08E0B.toInt()
 
     private fun Location.toUpdate() = LocationUpdate(
         position = LatLng(latitude = latitude, longitude = longitude),

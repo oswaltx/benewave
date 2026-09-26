@@ -314,6 +314,8 @@ public class NavigationService extends Service implements LocationListener
     final NotificationCompat.Builder notificationBuilder = getNotificationBuilder(this)
                                                                .setContentTitle(routingInfo.distToTurn.toString(this))
                                                                .setContentText(routingInfo.nextStreet);
+    dev.greenwave.maps.GreenWaveController.INSTANCE.decorateNotification( // greenWave
+        notificationBuilder, location, ContextCompat.getColor(this, R.color.notification));
 
     final Drawable drawable = AppCompatResources.getDrawable(this, routingInfo.carDirection.getTurnRes());
     if (drawable != null)
