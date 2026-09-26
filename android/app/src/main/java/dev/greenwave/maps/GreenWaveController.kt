@@ -7,6 +7,7 @@ import android.location.Location
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import app.organicmaps.sdk.Framework
 import app.organicmaps.sdk.Router
@@ -25,6 +26,7 @@ import dev.greenwave.shared.model.Route
 import dev.greenwave.shared.model.TrafficLight
 import dev.greenwave.shared.routing.TrafficLightsAlongRoute
 import dev.greenwave.shared.tracking.StopDetector
+import dev.greenwave.shared.tracking.StopEvent
 import dev.greenwave.shared.tracking.StopEventMatcher
 import dev.greenwave.shared.tracking.TrafficLightRhythmEstimator
 import java.lang.ref.WeakReference
@@ -264,7 +266,22 @@ object GreenWaveController {
             loggedStops = log.all().size
             Log.i(TAG, "stop ${event.durationSec}s at ${event.position}")
             if (lightPositions.isNotEmpty()) publishRoute(revision)
+            val light = StopEventMatcher.match(event.position, lightPositions) ?: lookUpLightNear(event.position)
+            val text = describeStop(event, light)
+            navEvent = text to System.currentTimeMillis()
+            main.post { hostActivity()?.let { Toast.makeText(it, text, Toast.LENGTH_SHORT).show() } }
         }
+    }
+
+    /** Last stop during navigation and when it happened; shown in the notification for a while. */
+    @Volatile private var navEvent: Pair<String, Long>? = null
+    private const val NAV_EVENT_SHOW_MS = 20_000L
+
+    /** Worker: one line for a registered stop, e.g. "Ampel registriert (35 s) · 3 Stopps dort". */
+    private fun describeStop(event: StopEvent, light: LatLng?): String {
+        if (light == null) return "Stopp ohne Ampel (${event.durationSec} s)"
+        val stopsThere = store?.all().orEmpty().count { StopEventMatcher.match(it.position, listOf(light)) == light }
+        return "Ampel registriert (${event.durationSec} s) · $stopsThere Stopps dort"
     }
 
     /** Worker: rider profile samples, lights passed, pass-throughs on predicted red. */
@@ -384,15 +401,11 @@ object GreenWaveController {
             trackingStops++
             Log.i(TAG, "tracking stop ${event.durationSec}s at ${event.position}")
             val light = lookUpLightNear(event.position)
-            trackingLastEvent = if (light != null) {
+            if (light != null) {
                 trackingLightSet.add(light)
                 trackingLights = trackingLightSet.size
-                val stopsThere = store?.all().orEmpty()
-                    .count { StopEventMatcher.match(it.position, listOf(light)) == light }
-                "Ampel registriert (${event.durationSec} s) · $stopsThere Stopps dort"
-            } else {
-                "Stopp ohne Ampel (${event.durationSec} s)"
             }
+            trackingLastEvent = describeStop(event, light)
             main.post { onTrackingEvent?.invoke() }
         }
     }
@@ -447,6 +460,12 @@ object GreenWaveController {
      * [defaultColor] restores CoMaps' colour when there is no advice.
      */
     fun decorateNotification(builder: NotificationCompat.Builder, location: Location, defaultColor: Int) {
+        navEvent?.let { (text, at) ->
+            if (System.currentTimeMillis() - at < NAV_EVENT_SHOW_MS) {
+                builder.setSubText(text).setColor(NOTIFICATION_GREEN)
+                return
+            }
+        }
         val guidance = state(location).guidance
         val target = guidance?.targetSpeedKmh
         if (guidance == null || target == null) {
