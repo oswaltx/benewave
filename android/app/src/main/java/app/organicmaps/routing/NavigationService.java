@@ -276,6 +276,8 @@ public class NavigationService extends Service implements LocationListener
     if (!routingController.isNavigating())
       return;
 
+    dev.greenwave.maps.GreenWaveController.INSTANCE.onRideLocation(location); // greenWave
+
     // Voice the turn notification first.
     final String[] turnNotifications = Framework.nativeGenerateNotifications(Config.TTS.getAnnounceStreets());
     if (turnNotifications != null)

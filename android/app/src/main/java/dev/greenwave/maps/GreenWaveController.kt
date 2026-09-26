@@ -1,5 +1,6 @@
 package dev.greenwave.maps
 
+import android.content.Context
 import android.location.Location
 import android.os.Handler
 import android.os.Looper
@@ -15,7 +16,11 @@ import dev.greenwave.shared.guidance.RideGuidance
 import dev.greenwave.shared.guidance.RideGuidanceCalculator
 import dev.greenwave.shared.location.LocationUpdate
 import dev.greenwave.shared.model.Route
+import dev.greenwave.shared.model.TrafficLight
 import dev.greenwave.shared.routing.TrafficLightsAlongRoute
+import dev.greenwave.shared.tracking.StopDetector
+import dev.greenwave.shared.tracking.StopEventMatcher
+import dev.greenwave.shared.tracking.TrafficLightRhythmEstimator
 import java.util.concurrent.Executors
 
 /**
@@ -23,9 +28,10 @@ import java.util.concurrent.Executors
  * route is built it looks up the traffic lights along it (Overpass), and on
  * every location fix it computes the speed advice for the navigation panel.
  *
- * Signal timings are not known yet: until measured rhythms exist every light
- * gets a deterministic placeholder program ([RandomTrafficTimingGenerator]),
- * exactly like the standalone greenWave app.
+ * While navigating, every fix also goes through a [StopDetector]; detected stops
+ * are logged on the device and, once a light has enough of them, its measured
+ * cycle ([TrafficLightRhythmEstimator]) replaces the placeholder program
+ * ([RandomTrafficTimingGenerator]) that every light starts with.
  */
 object GreenWaveController {
     private const val TAG = "GreenWave"
@@ -36,11 +42,20 @@ object GreenWaveController {
     /** Re-query Overpass only if this share of a new route leaves the area already covered. */
     private const val UNCOVERED_SHARE_FOR_REQUERY = 0.15
 
+    /** Measured rhythms below this confidence are not trusted over the placeholder. */
+    private const val MIN_CONFIDENCE = 0.5
+
     enum class LightsStatus { NO_ROUTE, LOADING, READY, FAILED }
 
-    data class State(val status: LightsStatus, val lightCount: Int, val guidance: RideGuidance?)
+    data class State(
+        val status: LightsStatus,
+        val lightCount: Int,
+        val learnedCount: Int,
+        val guidance: RideGuidance?,
+    )
 
     @Volatile private var route: Route? = null
+    @Volatile private var learnedCount = 0
     @Volatile var lightsStatus: LightsStatus = LightsStatus.NO_ROUTE
         private set
 
@@ -50,15 +65,23 @@ object GreenWaveController {
     private val coveredPaths = mutableListOf<List<LatLng>>()
     private var requestedRevision = -1
 
+    // Worker-only state for learning.
+    private var store: StopEventStore? = null
+    private val stopDetector = StopDetector()
+    private var lightPositions: List<LatLng> = emptyList()
+    private var lightsPath: List<LatLng> = emptyList()
+
     private val worker = Executors.newSingleThreadExecutor()
     private val main = Handler(Looper.getMainLooper())
     private var initialized = false
 
     var speedRange = SpeedRangeKmh(min = 10.0, max = 25.0)
 
-    fun init() {
+    fun init(context: Context) {
         if (initialized) return
         initialized = true
+        val appContext = context.applicationContext
+        worker.execute { store = StopEventStore(appContext) }
         RoutingController.get().addRouteChangedListener { onRouteChanged() }
         onRouteChanged()
     }
@@ -82,18 +105,17 @@ object GreenWaveController {
 
     /** Runs on [worker]. */
     private fun loadLights(path: List<LatLng>, revision: Int) {
+        lightPositions = emptyList()
         val status = try {
             if (needsQuery(path)) {
                 val signals = OverpassClient.trafficSignals(TrafficLightsAlongRoute.overpassQuery(path))
                 knownSignals.addAll(signals)
                 coveredPaths.add(path)
             }
-            val lights = TrafficLightsAlongRoute.select(path, knownSignals.toList())
-                .map { RandomTrafficTimingGenerator.deterministic(it) }
-            main.post {
-                if (revision == requestedRevision) route = Route(path = path, trafficLights = lights)
-            }
-            Log.i(TAG, "route rev $revision: ${lights.size} traffic lights")
+            lightsPath = path
+            lightPositions = TrafficLightsAlongRoute.select(path, knownSignals.toList())
+            publishRoute(revision)
+            Log.i(TAG, "route rev $revision: ${lightPositions.size} traffic lights")
             LightsStatus.READY
         } catch (e: Exception) {
             Log.w(TAG, "traffic light lookup failed", e)
@@ -101,6 +123,59 @@ object GreenWaveController {
         }
         main.post { if (revision == requestedRevision) lightsStatus = status }
     }
+
+    /** Worker: combine current light positions with what has been learned so far. */
+    private fun publishRoute(revision: Int) {
+        val events = store?.all().orEmpty()
+        var learned = 0
+        val lights = lightPositions.map { position ->
+            val stops = events.filter { StopEventMatcher.match(it.position, lightPositions) == position }
+            val estimate = TrafficLightRhythmEstimator.estimate(stops)
+            if (estimate != null && estimate.confidence >= MIN_CONFIDENCE) {
+                learned++
+                TrafficLight(
+                    position = position,
+                    cycleLengthSec = estimate.cycleLengthSec,
+                    greenStartOffsetSec = estimate.greenStartOffsetSec,
+                    greenDurationSec = estimate.greenDurationSec,
+                )
+            } else {
+                RandomTrafficTimingGenerator.deterministic(position)
+            }
+        }
+        val path = lightsPath
+        val count = learned
+        main.post {
+            if (revision == requestedRevision) {
+                route = Route(path = path, trafficLights = lights)
+                learnedCount = count
+            }
+        }
+    }
+
+    /**
+     * Every fix while navigating (from NavigationService, so also with the
+     * screen off). Feeds the stop detector on bicycle routes only.
+     */
+    fun onRideLocation(location: Location) {
+        if (route == null) return
+        val update = location.toUpdate()
+        val revision = requestedRevision
+        worker.execute {
+            val event = stopDetector.onUpdate(update) ?: return@execute
+            val log = store ?: return@execute
+            log.append(event)
+            Log.i(TAG, "stop ${event.durationSec}s at ${event.position}")
+            if (lightPositions.isNotEmpty()) publishRoute(revision)
+        }
+    }
+
+    private fun Location.toUpdate() = LocationUpdate(
+        position = LatLng(latitude = latitude, longitude = longitude),
+        epochSec = time / 1000,
+        speedKmh = if (hasSpeed()) speed * 3.6 else 0.0,
+        bearingDegrees = if (hasBearing()) bearing else null,
+    )
 
     private fun needsQuery(path: List<LatLng>): Boolean {
         if (coveredPaths.isEmpty()) return true
@@ -114,22 +189,17 @@ object GreenWaveController {
 
     /** Current advice for [location]; call on the main thread. */
     fun state(location: Location?): State {
-        val current = route ?: return State(LightsStatus.NO_ROUTE, 0, null)
+        val current = route ?: return State(LightsStatus.NO_ROUTE, 0, 0, null)
         if (location == null || lightsStatus != LightsStatus.READY) {
-            return State(lightsStatus, current.trafficLights.size, null)
+            return State(lightsStatus, current.trafficLights.size, learnedCount, null)
         }
-        val update = LocationUpdate(
-            position = LatLng(latitude = location.latitude, longitude = location.longitude),
-            epochSec = location.time / 1000,
-            speedKmh = if (location.hasSpeed()) location.speed * 3.6 else 0.0,
-            bearingDegrees = if (location.hasBearing()) location.bearing else null,
-        )
+        val update = location.toUpdate()
         val progress = distanceAlongPath(current.path, update.position)
         val ahead = current.trafficLights.filter {
             val d = distanceAlongPath(current.path, it.position) - progress
             d > 0 && d <= LOOKAHEAD_METERS
         }
         val guidance = RideGuidanceCalculator.compute(current.copy(trafficLights = ahead), update, speedRange)
-        return State(LightsStatus.READY, current.trafficLights.size, guidance)
+        return State(LightsStatus.READY, current.trafficLights.size, learnedCount, guidance)
     }
 }

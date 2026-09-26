@@ -64,11 +64,12 @@ class GreenWavePanel @JvmOverloads constructor(
             else -> {
                 val target = "${guidance.targetSpeedKmh!!.roundToInt()} km/h"
                 val distance = guidance.nextLightDistanceMeters?.let { " · ${formatDistance(it)}" } ?: ""
+                val learned = learnedSuffix(state)
                 when (guidance.advice) {
-                    SpeedAdvice.HOLD -> show(GREEN, target, "halten$distance")
-                    SpeedAdvice.FASTER -> show(AMBER, target, "▲ schneller$distance")
-                    SpeedAdvice.SLOWER -> show(AMBER, target, "▼ langsamer$distance")
-                    SpeedAdvice.NONE -> show(GREY, target, distance.removePrefix(" · "))
+                    SpeedAdvice.HOLD -> show(GREEN, target, "halten$distance$learned")
+                    SpeedAdvice.FASTER -> show(AMBER, target, "▲ schneller$distance$learned")
+                    SpeedAdvice.SLOWER -> show(AMBER, target, "▼ langsamer$distance$learned")
+                    SpeedAdvice.NONE -> show(GREY, target, distance.removePrefix(" · ") + learned)
                 }
             }
         }
@@ -79,6 +80,9 @@ class GreenWavePanel @JvmOverloads constructor(
         speed.text = big
         detail.text = small
     }
+
+    private fun learnedSuffix(state: GreenWaveController.State): String =
+        if (state.learnedCount > 0) "\n${state.learnedCount}/${state.lightCount} gelernt" else ""
 
     private fun formatDistance(meters: Double): String =
         if (meters < 1000) "${(meters / 10).roundToInt() * 10} m" else "%.1f km".format(meters / 1000)

@@ -111,7 +111,7 @@ public class NavigationController implements TrafficManager.TrafficCallback, Nav
     mSpeedLimit = topFrame.findViewById(R.id.nav_speed_limit);
     mCurrentSpeed = topFrame.findViewById(R.id.nav_current_speed);
     mGreenWavePanel = topFrame.findViewById(R.id.nav_green_wave); // greenWave
-    dev.greenwave.maps.GreenWaveController.INSTANCE.init(); // greenWave
+    dev.greenwave.maps.GreenWaveController.INSTANCE.init(topFrame.getContext()); // greenWave
 
     UiUtils.showIf(mSpeedLimitEnabled, mSpeedLimit);
     View mTopbar = topFrame.findViewById(R.id.statutbar);
