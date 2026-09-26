@@ -47,6 +47,11 @@ class GreenWavePanel @JvmOverloads constructor(
         addView(speed)
         addView(detail)
         visibility = View.GONE
+        // Long press opens greenWave's settings (speed range, rider profile, red-light flag).
+        setOnLongClickListener {
+            GreenWaveDialogs.showSettings(context)
+            true
+        }
     }
 
     fun update(state: GreenWaveController.State) {
