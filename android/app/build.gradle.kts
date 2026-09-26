@@ -31,8 +31,8 @@ java {
     }
 }
 
-val appName = "CoMaps"
-val appId = "app.comaps"
+val appName = "greenWave Maps"
+val appId = "dev.greenwave.maps"
 // These are properly set in the 'secure.properties.*' files but must be declared here for build sync to succeed.
 project.ext["secretTestStoreFile"] = "comaps-test.keystore"
 project.ext["secretTestStorePassword"] = ""
@@ -193,7 +193,7 @@ android {
         getByName("debug") {
             storeFile = project.projectDir.resolve(File(comapsDebugKeystorePath))
             storePassword = "12345678"
-            keyAlias = "$appName Debug"
+            keyAlias = "CoMaps Debug" // alias inside the upstream debug keystore
             keyPassword = "12345678"
         }
         create("test") {
