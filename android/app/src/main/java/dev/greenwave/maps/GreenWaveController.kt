@@ -29,6 +29,8 @@ import dev.greenwave.shared.tracking.StopDetector
 import dev.greenwave.shared.tracking.StopEvent
 import dev.greenwave.shared.tracking.StopEventMatcher
 import dev.greenwave.shared.tracking.TrafficLightRhythmEstimator
+import org.json.JSONArray
+import org.json.JSONObject
 import java.lang.ref.WeakReference
 import java.util.concurrent.Executors
 import kotlin.math.roundToInt
@@ -106,6 +108,11 @@ object GreenWaveController {
 
     // Tracking mode (GreenWaveTrackingService): worker-only except the counters.
     private var track: TrackFile? = null
+    /** True if [track] was opened by a navigation (no tracking mode running). */
+    private var trackByNav = false
+    /** Latest suggested bicycle route, written next to the track once one is open. */
+    private var suggestedRoute: JSONObject? = null
+    private var appContext: Context? = null
     @Volatile var trackingStops = 0
         private set
     /** Lights at which a stop was registered during this tracking. */
@@ -144,6 +151,7 @@ object GreenWaveController {
         if (initialized) return
         initialized = true
         val appContext = context.applicationContext
+        this.appContext = appContext
         settings = GreenWaveSettings(appContext)
         worker.execute {
             store = StopEventStore(appContext).also { loggedStops = it.all().size }
@@ -166,7 +174,7 @@ object GreenWaveController {
             if (wasActive) Framework.nativeClearGreenWaveMarks()
             lightsStatus = LightsStatus.NO_ROUTE
             requestedRevision = -1
-            if (wasActive) worker.execute { finishRide() }
+            if (wasActive) worker.execute { suggestedRoute = null; finishRide() }
             return
         }
         if (geometry.mRevision == requestedRevision) return
@@ -176,7 +184,25 @@ object GreenWaveController {
         route = Route(path = path, trafficLights = emptyList())
         lightsStatus = LightsStatus.LOADING
         val revision = geometry.mRevision
-        worker.execute { loadLights(path, revision) }
+        val suggestion = suggestedRouteJson(path, controller.cachedRoutingInfo?.totalTimeInSeconds)
+        worker.execute {
+            suggestedRoute = suggestion
+            track?.addRoute(suggestion)
+            loadLights(path, revision)
+        }
+    }
+
+    /** The route as the router suggested it: when, its ETA and length, and the path. */
+    private fun suggestedRouteJson(path: List<LatLng>, etaSec: Int?): JSONObject {
+        val coords = JSONArray()
+        path.forEach { coords.put(it.latitude).put(it.longitude) }
+        var length = 0.0
+        for (i in 1 until path.size) length += distanceMeters(path[i - 1], path[i])
+        return JSONObject()
+            .put("epoch_s", System.currentTimeMillis() / 1000)
+            .put("eta_s", etaSec ?: JSONObject.NULL)
+            .put("length_m", length.roundToInt())
+            .put("path_latlon", coords)
     }
 
     /** Runs on [worker]. */
@@ -258,7 +284,10 @@ object GreenWaveController {
         if (route == null || settings?.loggingEnabled == false) return
         val update = location.toUpdate()
         val revision = requestedRevision
+        val fix = Location(location)
         worker.execute {
+            if (track == null) openNavTrack(update.epochSec)
+            if (trackByNav) track?.append(fix)
             trackRide(update)
             val event = stopDetector.onUpdate(update) ?: return@execute
             val log = store ?: return@execute
@@ -271,6 +300,14 @@ object GreenWaveController {
             navEvent = text to System.currentTimeMillis()
             main.post { hostActivity()?.let { Toast.makeText(it, text, Toast.LENGTH_SHORT).show() } }
         }
+    }
+
+    /** Worker: navigation without tracking mode also records its track, next to the suggested route. */
+    private fun openNavTrack(epochSec: Long) {
+        val context = appContext ?: return
+        track = TrackFile(context, epochSec).also { t -> suggestedRoute?.let { t.addRoute(it) } }
+        trackByNav = true
+        Log.i(TAG, "navigation track started: ${track?.file?.name}")
     }
 
     /** Last stop during navigation and when it happened; shown in the notification for a while. */
@@ -316,6 +353,11 @@ object GreenWaveController {
 
     /** Worker: navigation ended — log the ride and ask for a rating. */
     private fun finishRide(askRating: Boolean = true) {
+        if (trackByNav) {
+            track?.close()
+            track = null
+            trackByNav = false
+        }
         val done = ride ?: return
         ride = null
         lights = emptyList()
@@ -379,7 +421,9 @@ object GreenWaveController {
         worker.execute {
             track?.close()
             trackingLightSet.clear()
+            trackByNav = false
             track = TrackFile(appContext, System.currentTimeMillis() / 1000)
+                .also { t -> if (route != null) suggestedRoute?.let { t.addRoute(it) } }
             Log.i(TAG, "tracking started: ${track?.file?.name}")
         }
     }

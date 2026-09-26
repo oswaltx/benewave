@@ -78,7 +78,7 @@ internal object GreenWaveDialogs {
             "Ampeldaten" to { showLightData(activity) },
             "Einstellungen" to { showSettings(activity) },
         )
-        if (tracks.isNotEmpty()) items.add("Aufzeichnungen teilen (${tracks.size})" to { shareTracks(activity, tracks) })
+        if (tracks.isNotEmpty()) items.add("Aufzeichnungen teilen (${TrackFile.count(activity)})" to { shareTracks(activity, tracks) })
         MaterialAlertDialogBuilder(activity)
             .setTitle("greenWave")
             .setItems(items.map { it.first }.toTypedArray()) { _, which -> items[which].second() }
