@@ -12,15 +12,14 @@ import androidx.core.app.NotificationCompat
 import app.organicmaps.sdk.Framework
 import app.organicmaps.sdk.Router
 import app.organicmaps.sdk.routing.RoutingController
+import dev.greenwave.shared.algorithm.SpeedOptions
+import dev.greenwave.shared.algorithm.SpeedOptionsCalculator
 import dev.greenwave.shared.algorithm.SpeedRangeKmh
 import dev.greenwave.shared.data.RandomTrafficTimingGenerator
 import dev.greenwave.shared.geo.LatLng
 import dev.greenwave.shared.geo.distanceAlongPath
 import dev.greenwave.shared.geo.distanceMeters
 import dev.greenwave.shared.geo.distanceToPath
-import dev.greenwave.shared.guidance.RideGuidance
-import dev.greenwave.shared.guidance.RideGuidanceCalculator
-import dev.greenwave.shared.guidance.SpeedAdvice
 import dev.greenwave.shared.location.LocationUpdate
 import dev.greenwave.shared.model.Route
 import dev.greenwave.shared.model.TrafficLight
@@ -66,11 +65,25 @@ object GreenWaveController {
         val status: LightsStatus,
         val lightCount: Int,
         val learnedCount: Int,
-        val guidance: RideGuidance?,
+        val advice: Advice?,
+    )
+
+    /**
+     * What the panel and notification show for the next light. Without a learned
+     * cycle for it ([nextLightKnown] false) there is deliberately no speed:
+     * the placeholder timing would only be a guess.
+     */
+    data class Advice(
+        val nextLightDistanceMeters: Double?,
+        val nextLightKnown: Boolean,
+        /** Null if there is no light ahead or it is not known. */
+        val options: SpeedOptions?,
     )
 
     @Volatile private var route: Route? = null
     @Volatile private var learnedCount = 0
+    /** Learned lights of [route] (main thread copy of [learnedPositions]). */
+    @Volatile private var routeLearned: Set<LatLng> = emptySet()
     @Volatile var lightsStatus: LightsStatus = LightsStatus.NO_ROUTE
         private set
 
@@ -270,6 +283,7 @@ object GreenWaveController {
         main.post {
             if (revision == requestedRevision) {
                 route = Route(path = path, trafficLights = lights)
+                routeLearned = learnedSet
                 learnedCount = count
                 showMarks(lights, learnedSet)
             }
@@ -523,28 +537,27 @@ object GreenWaveController {
                 return
             }
         }
-        val guidance = state(location).guidance
-        val target = guidance?.targetSpeedKmh
-        if (guidance == null || target == null) {
+        val advice = state(location).advice
+        val distance = advice?.nextLightDistanceMeters ?: run {
             builder.setSubText(null).setColor(defaultColor)
             return
         }
-        val arrow = when (guidance.advice) {
-            SpeedAdvice.FASTER -> " ▲"
-            SpeedAdvice.SLOWER -> " ▼"
-            SpeedAdvice.HOLD -> " ✓"
-            SpeedAdvice.NONE -> ""
+        val where = "Ampel ${(distance / 10).roundToInt() * 10} m"
+        val options = advice.options
+        when {
+            !advice.nextLightKnown -> builder.setSubText("? $where unbekannt").setColor(defaultColor)
+            options?.holdKmh != null -> builder.setSubText("✓ halten · $where").setColor(NOTIFICATION_GREEN)
+            options != null && (options.slowerKmh != null || options.fasterKmh != null) ->
+                builder.setSubText("${speedPair(options)} · $where").setColor(NOTIFICATION_AMBER)
+            else -> builder.setSubText("– kein Grün erreichbar · $where").setColor(defaultColor)
         }
-        val distance = guidance.nextLightDistanceMeters?.let { " · Ampel ${(it / 10).roundToInt() * 10} m" } ?: ""
-        builder.setSubText("${target.roundToInt()} km/h$arrow$distance")
-        builder.setColor(
-            when (guidance.advice) {
-                SpeedAdvice.HOLD -> NOTIFICATION_GREEN
-                SpeedAdvice.FASTER, SpeedAdvice.SLOWER -> NOTIFICATION_AMBER
-                SpeedAdvice.NONE -> defaultColor
-            },
-        )
     }
+
+    /** "▼ 16 | ▲ 20 km/h", leaving out a missing side. */
+    internal fun speedPair(options: SpeedOptions): String = listOfNotNull(
+        options.slowerKmh?.let { "▼ ${it.roundToInt()}" },
+        options.fasterKmh?.let { "▲ ${it.roundToInt()}" },
+    ).joinToString(" | ") + " km/h"
 
     private val NOTIFICATION_GREEN = 0xFF2E7D32.toInt()
     private val NOTIFICATION_AMBER = 0xFFE08E0B.toInt()
@@ -584,11 +597,22 @@ object GreenWaveController {
         }
         val update = location.toUpdate()
         val progress = distanceAlongPath(current.path, update.position)
-        val ahead = current.trafficLights.filter {
-            val d = distanceAlongPath(current.path, it.position) - progress
-            d > 0 && d <= LOOKAHEAD_METERS
-        }
-        val guidance = RideGuidanceCalculator.compute(current.copy(trafficLights = ahead), update, speedRange)
-        return State(LightsStatus.READY, current.trafficLights.size, learnedCount, guidance)
+        val ahead = current.trafficLights
+            .map { it to distanceAlongPath(current.path, it.position) - progress }
+            .filter { it.second > 0 && it.second <= LOOKAHEAD_METERS }
+            .sortedBy { it.second }
+        val next = ahead.firstOrNull()
+            ?: return State(LightsStatus.READY, current.trafficLights.size, learnedCount, Advice(null, false, null))
+        val known = next.first.position in routeLearned
+        // Only learned lights take part; an unknown one further on must not steer the speed either.
+        val learnedAhead = ahead.map { it.first }.takeWhile { it.position in routeLearned }
+        val options = if (!known) null else SpeedOptionsCalculator.compute(
+            route = current.copy(trafficLights = learnedAhead),
+            currentPosition = update.position,
+            nowEpochSec = update.epochSec,
+            currentSpeedKmh = update.speedKmh,
+            speedRange = speedRange,
+        )
+        return State(LightsStatus.READY, current.trafficLights.size, learnedCount, Advice(next.second, known, options))
     }
 }
