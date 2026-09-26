@@ -1,6 +1,7 @@
 package dev.greenwave.maps
 
 import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.text.InputType
@@ -10,6 +11,7 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.RatingBar
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.FileProvider
 import app.organicmaps.BuildConfig
@@ -17,6 +19,7 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import dev.greenwave.shared.algorithm.SpeedRangeKmh
 import dev.greenwave.shared.geo.LatLng
 import java.io.File
+import java.util.Locale
 import kotlin.math.roundToInt
 
 /** greenWave's dialogs, built in code so CoMaps' layouts stay untouched. */
@@ -75,6 +78,7 @@ internal object GreenWaveDialogs {
             (if (tracking) "Tracking beenden" else "Tracking starten") to {
                 if (tracking) GreenWaveTrackingService.stop(activity) else confirmTracking(activity)
             },
+            "Meine Fahrten" to { showRides(activity) },
             "Ampeldaten" to { showLightData(activity) },
             "Einstellungen" to { showSettings(activity) },
         )
@@ -106,6 +110,75 @@ internal object GreenWaveDialogs {
             .putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         activity.startActivity(Intent.createChooser(intent, "Aufzeichnungen teilen"))
+    }
+
+    /** All recorded rides (tracking mode and bicycle navigations), newest first. */
+    fun showRides(activity: Activity) {
+        GreenWaveController.rideSummaries { rides ->
+            if (activity.isFinishing || activity.isDestroyed) return@rideSummaries
+            val rows = rides.map { r ->
+                val km = "%.1f".format(Locale.GERMAN, r.distanceMeters / 1000)
+                val avg = r.movingAvgKmh?.let { " · Ø ${it.roundToInt()} km/h" } ?: ""
+                "${RideHistory.title(r)}${if (r.suggestedEtaSec != null || r.suggestedLengthMeters != null) " · Navi" else ""}\n" +
+                    "${RideHistory.minutes(r.durationSec)} · $km km$avg · ${r.stops.size} Stopps"
+            }
+            MaterialAlertDialogBuilder(activity)
+                .setTitle("Meine Fahrten (${rides.size})")
+                .apply {
+                    if (rows.isEmpty()) setMessage("Noch keine Fahrten. Starte das Tracking oder eine Navigation mit dem Fahrrad-Profil.")
+                    else setItems(rows.toTypedArray()) { _, which -> showRide(activity, rides[which]) }
+                }
+                .setPositiveButton("OK", null)
+                .show()
+        }
+    }
+
+    private fun showRide(activity: Activity, r: RideSummary) {
+        val lines = mutableListOf<String>()
+        lines += "Dauer: ${RideHistory.minutes(r.durationSec)}"
+        lines += "Strecke: ${"%.2f".format(Locale.GERMAN, r.distanceMeters / 1000)} km"
+        r.movingAvgKmh?.let { lines += "Ø in Bewegung: ${"%.1f".format(Locale.GERMAN, it)} km/h" }
+        r.maxKmh?.let { lines += "Höchsttempo: ${it.roundToInt()} km/h" }
+        lines += "Stopps: ${r.stops.size}, davon an Ampeln: ${r.stopsAtLights}"
+        if (r.stops.isNotEmpty()) lines += "Stehzeit gesamt: ${RideHistory.minutes(r.waitSec)}"
+        if (r.suggestedEtaSec != null || r.suggestedLengthMeters != null) {
+            lines += ""
+            lines += "Vorschlag der Navigation:"
+            r.suggestedEtaSec?.let { eta ->
+                val diff = r.durationSec - eta
+                val sign = if (diff > 0) "langsamer" else "schneller"
+                lines += "  ${RideHistory.minutes(eta.toLong())} (du: ${RideHistory.minutes(kotlin.math.abs(diff))} $sign)"
+            }
+            r.suggestedLengthMeters?.let {
+                lines += "  ${"%.2f".format(Locale.GERMAN, it / 1000.0)} km (du: ${"%+.2f".format(Locale.GERMAN, (r.distanceMeters - it) / 1000)} km)"
+            }
+            if (r.reroutes > 0) lines += "  ${r.reroutes}× neu berechnet (abgewichen)"
+        }
+        r.rating?.let { lines += "Bewertung: $it von 5" }
+        MaterialAlertDialogBuilder(activity)
+            .setTitle(RideHistory.title(r))
+            .setMessage(lines.joinToString("\n"))
+            .setPositiveButton("Auf der Karte", { _, _ -> showOnMap(activity, r) })
+            .setNeutralButton("Teilen") { _, _ ->
+                shareTracks(activity, listOf(r.track) + listOf(File(r.track.path.removeSuffix(".csv") + "-routes.json")).filter { it.exists() })
+            }
+            .setNegativeButton("Zurück") { _, _ -> showRides(activity) }
+            .show()
+    }
+
+    /** Hands the track as GPX to CoMaps' own import, which draws it and keeps it under "Lesezeichen und Tracks". */
+    private fun showOnMap(activity: Activity, r: RideSummary) {
+        val gpx = RideHistory.toGpx(activity, r)
+        val uri = FileProvider.getUriForFile(activity, BuildConfig.FILE_PROVIDER_AUTHORITY, gpx)
+        val intent = Intent(Intent.ACTION_VIEW)
+            .setDataAndType(uri, "application/gpx+xml")
+            .setPackage(activity.packageName)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        try {
+            activity.startActivity(intent)
+        } catch (e: ActivityNotFoundException) {
+            Toast.makeText(activity, "Karten-Import nicht gefunden, bitte „Teilen“ verwenden.", Toast.LENGTH_LONG).show()
+        }
     }
 
     /** Everything learned so far, one line per light. */

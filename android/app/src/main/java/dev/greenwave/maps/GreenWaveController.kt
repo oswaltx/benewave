@@ -486,6 +486,19 @@ object GreenWaveController {
         .filter { it.second < TrafficLightsAlongRoute.MAX_DISTANCE_TO_ROUTE_METERS }
         .minByOrNull { it.second }?.first
 
+    /** "Meine Fahrten": every recorded track, newest first; [onResult] runs on main. */
+    internal fun rideSummaries(onResult: (List<RideSummary>) -> Unit) {
+        val context = appContext ?: return
+        worker.execute {
+            val list = runCatching {
+                RideHistory.summaries(
+                    context, store?.all().orEmpty(), rideLog?.all().orEmpty(), knownLights?.all().orEmpty(),
+                )
+            }.onFailure { Log.w(TAG, "reading rides failed", it) }.getOrDefault(emptyList())
+            main.post { onResult(list) }
+        }
+    }
+
     /** Worker-side persistence for the rating dialog. */
     internal fun saveRating(ride: Ride, rating: Int?, wrongLights: List<LatLng>) {
         worker.execute { rideLog?.rate(ride.startEpochSec, rating, wrongLights) }
