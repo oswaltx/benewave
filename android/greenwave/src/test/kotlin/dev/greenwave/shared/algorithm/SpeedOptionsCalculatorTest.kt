@@ -57,6 +57,38 @@ class SpeedOptionsCalculatorTest {
     }
 
     @Test
+    fun holdStillOffersTheNeighbouringGreens() {
+        // 20.5 km/h is inside the 19.5–22 band; 16.5 (later green) and ~27.5 (earlier green) are the neighbours.
+        val options = assertNotNull(SpeedOptionsCalculator.compute(route, path.first(), 0L, 20.5, range))
+        assertNotNull(options.holdKmh)
+        val slower = assertNotNull(options.slowerKmh)
+        val faster = assertNotNull(options.fasterKmh)
+        assertTrue(slower < 19.5 && faster > 22.0, "slower=$slower faster=$faster")
+        assertTrue(!options.slowerOutOfRange && !options.fasterOutOfRange)
+    }
+
+    @Test
+    fun sideWithoutBandInRangeFallsBackToOuterRangeFlagged() {
+        // Range 10–18: the faster band (19.5–22) lies above it, so it comes from the outer range.
+        val options = assertNotNull(SpeedOptionsCalculator.compute(route, path.first(), 0L, 17.0, SpeedRangeKmh(10.0, 18.0)))
+        assertEquals(16.5, options.slowerKmh)
+        assertTrue(!options.slowerOutOfRange)
+        assertEquals(19.5, options.fasterKmh)
+        assertTrue(options.fasterOutOfRange)
+    }
+
+    @Test
+    fun bandInsideTheRangeWinsOverACloserOneOutside() {
+        // Range 18–30 at 17 km/h (below it): the in-range 19.5 band is the faster option, never an outer one.
+        val options = assertNotNull(SpeedOptionsCalculator.compute(route, path.first(), 0L, 17.0, SpeedRangeKmh(18.0, 30.0)))
+        assertEquals(19.5, options.fasterKmh)
+        assertTrue(!options.fasterOutOfRange)
+        // The slower side has no band in 18–30 below 17, so it is the outer 15–16.5 band.
+        assertEquals(16.5, options.slowerKmh)
+        assertTrue(options.slowerOutOfRange)
+    }
+
+    @Test
     fun edgeOfRangeHasNoOptionBeyondIt() {
         val options = assertNotNull(SpeedOptionsCalculator.compute(route, path.first(), 0L, 30.0, SpeedRangeKmh(10.0, 30.0)))
         assertEquals(null, options.fasterKmh)

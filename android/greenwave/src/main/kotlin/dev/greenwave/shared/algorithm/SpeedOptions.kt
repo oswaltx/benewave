@@ -5,16 +5,24 @@ import dev.greenwave.shared.geo.distanceAlongPath
 import dev.greenwave.shared.model.Route
 import dev.greenwave.shared.model.TrafficLight
 import kotlin.math.abs
+import kotlin.math.floor
 
 /**
  * The two ways to make the next light on green: speed up to catch an earlier
  * green, or slow down to arrive in a later one. [holdKmh] is set when the
- * current speed already arrives on green.
+ * current speed already arrives on green; the two options are there as well
+ * then (the neighbouring green phases).
+ *
+ * An option outside the rider's speed range comes from the wider
+ * [SpeedOptionsCalculator.OUTER_RANGE] and is flagged, so it can be shown
+ * dimmed instead of not at all.
  */
 data class SpeedOptions(
     val slowerKmh: Double?,
     val fasterKmh: Double?,
     val holdKmh: Double?,
+    val slowerOutOfRange: Boolean = false,
+    val fasterOutOfRange: Boolean = false,
 )
 
 /**
@@ -26,8 +34,14 @@ data class SpeedOptions(
  *
  * Arrivals within [startMarginSec] after green starts or [endMarginSec] before
  * it ends don't count, so the options don't sit right on a phase edge.
+ *
+ * So that there are two options whenever possible, a side without a band in
+ * [SpeedRangeKmh] takes the nearest band in [OUTER_RANGE] instead (flagged as
+ * out of range). Bands inside the range always win over ones outside it.
  */
 object SpeedOptionsCalculator {
+    /** Still plausible on a bicycle; options beyond the rider's own range come from here. */
+    val OUTER_RANGE = SpeedRangeKmh(min = 5.0, max = 35.0)
 
     fun compute(
         route: Route,
@@ -47,35 +61,46 @@ object SpeedOptionsCalculator {
         if (ahead.isEmpty()) return null
         val (next, nextDistance) = ahead.first()
 
-        class Candidate(val speed: Double, val hits: Int)
+        class Candidate(val speed: Double, val hits: Int, val inRange: Boolean)
         val bands = mutableListOf<MutableList<Candidate>>()
         var inBand = false
-        var speed = speedRange.min
-        while (speed <= speedRange.max + 1e-9) {
+        // Grid through speedRange.min (as before), widened step by step to OUTER_RANGE.
+        val stepsBelow = floor((speedRange.min - minOf(OUTER_RANGE.min, speedRange.min)) / stepKmh + 1e-9).toInt()
+        val top = maxOf(OUTER_RANGE.max, speedRange.max)
+        var i = -stepsBelow
+        while (speedRange.min + i * stepKmh <= top + 1e-9) {
+            val speed = speedRange.min + i * stepKmh
             if (arrivesOnGreen(next, nowEpochSec, nextDistance, speed, startMarginSec, endMarginSec)) {
                 val hits = ahead.count { (light, d) -> arrivesOnGreen(light, nowEpochSec, d, speed, 0, 0) }
+                val inRange = speed >= speedRange.min - 1e-9 && speed <= speedRange.max + 1e-9
                 if (!inBand) bands.add(mutableListOf())
-                bands.last().add(Candidate(speed, hits))
+                bands.last().add(Candidate(speed, hits, inRange))
                 inBand = true
             } else {
                 inBand = false
             }
-            speed += stepKmh
+            i++
         }
 
+        fun inRange(band: List<Candidate>) = band.any { it.inRange }
         fun best(band: List<Candidate>): Double = band
+            .filter { it.inRange }.ifEmpty { band }
             .sortedWith(compareByDescending<Candidate> { it.hits }.thenBy { abs(it.speed - currentSpeedKmh) })
             .first().speed
 
         val current = bands.firstOrNull { band ->
             currentSpeedKmh >= band.first().speed - stepKmh / 2 && currentSpeedKmh <= band.last().speed + stepKmh / 2
         }
-        val faster = bands.firstOrNull { it.first().speed > currentSpeedKmh && it !== current }
-        val slower = bands.lastOrNull { it.last().speed < currentSpeedKmh && it !== current }
+        val above = bands.filter { it.first().speed > currentSpeedKmh && it !== current }
+        val below = bands.filter { it.last().speed < currentSpeedKmh && it !== current }
+        val faster = above.firstOrNull(::inRange) ?: above.firstOrNull()
+        val slower = below.lastOrNull(::inRange) ?: below.lastOrNull()
         return SpeedOptions(
             slowerKmh = slower?.let(::best),
             fasterKmh = faster?.let(::best),
             holdKmh = current?.let(::best),
+            slowerOutOfRange = slower != null && !inRange(slower),
+            fasterOutOfRange = faster != null && !inRange(faster),
         )
     }
 

@@ -14,9 +14,11 @@ import kotlin.math.roundToInt
 
 /**
  * Small card in the navigation screen for the next traffic light: the two ways
- * to make it on green (slower ▼ and faster ▲), "halten" when the current speed
- * already works, and a "?" when the light's cycle is not learned yet — then
- * there is deliberately no speed. Hidden unless a bicycle route is active.
+ * to make it on green (slower ▼ for a later green, faster ▲ for an earlier
+ * one), with a ✓ between them when the current speed already works, and a "?"
+ * when the light's cycle is not learned yet — then there is deliberately no
+ * speed. An option outside the rider's speed range is dimmed. Hidden unless a
+ * bicycle route is active.
  */
 class GreenWavePanel @JvmOverloads constructor(
     context: Context,
@@ -24,11 +26,14 @@ class GreenWavePanel @JvmOverloads constructor(
 ) : LinearLayout(context, attrs) {
 
     private val slower = speedText()
+    private val hold = speedText()
     private val faster = speedText()
     private val speeds = LinearLayout(context).apply {
         orientation = HORIZONTAL
         gravity = Gravity.CENTER
         addView(slower)
+        addView(View(context), LayoutParams(dp(12f).roundToInt(), 1))
+        addView(hold)
         addView(View(context), LayoutParams(dp(12f).roundToInt(), 1))
         addView(faster)
     }
@@ -81,26 +86,39 @@ class GreenWavePanel @JvmOverloads constructor(
             !advice.nextLightKnown -> show(GREY, "?", null, "Ampel unbekannt · ${formatDistance(distance)}$learned")
             else -> {
                 val o = advice.options
-                val low = o?.slowerKmh?.let { "▼${it.roundToInt()}" }
-                val high = o?.fasterKmh?.let { "▲${it.roundToInt()}" }
-                when {
-                    o?.holdKmh != null ->
-                        show(GREEN, "✓", null, "halten · ${formatDistance(distance)}$learned")
-                    low == null && high == null ->
-                        show(GREY, "–", null, "kein Grün erreichbar · ${formatDistance(distance)}$learned")
-                    else -> show(AMBER, low ?: "–", high ?: "–", "km/h · ${formatDistance(distance)}$learned")
+                if (o == null || (o.holdKmh == null && o.slowerKmh == null && o.fasterKmh == null)) {
+                    show(GREY, "–", null, "kein Grün erreichbar · ${formatDistance(distance)}$learned")
+                } else {
+                    val holding = o.holdKmh != null
+                    show(
+                        if (holding) GREEN else AMBER,
+                        "▼${o.slowerKmh?.roundToInt() ?: "–"}",
+                        "▲${o.fasterKmh?.roundToInt() ?: "–"}",
+                        (if (holding) "halten" else "km/h") + " · ${formatDistance(distance)}$learned",
+                        middle = if (holding) "✓" else null,
+                    )
+                    slower.alpha = if (o.slowerOutOfRange || o.slowerKmh == null) DIMMED else 1f
+                    faster.alpha = if (o.fasterOutOfRange || o.fasterKmh == null) DIMMED else 1f
                 }
             }
         }
     }
 
-    /** [left]/[right]: the two speeds; with [right] null only [left] is shown, centred. */
-    private fun show(color: Int, left: String, right: String?, small: String) {
+    /**
+     * [left]/[right]: the two speeds, [middle] the ✓ between them; with [right]
+     * null only [left] is shown, centred.
+     */
+    private fun show(color: Int, left: String, right: String?, small: String, middle: String? = null) {
         background.setColor(color)
         slower.text = left
+        slower.alpha = 1f
+        faster.alpha = 1f
         faster.text = right ?: ""
         faster.visibility = if (right == null) View.GONE else View.VISIBLE
-        speeds.getChildAt(1).visibility = faster.visibility
+        hold.text = middle ?: ""
+        hold.visibility = if (middle == null) View.GONE else View.VISIBLE
+        speeds.getChildAt(1).visibility = if (right == null && middle == null) View.GONE else View.VISIBLE
+        speeds.getChildAt(3).visibility = hold.visibility
         detail.text = small
     }
 
@@ -121,5 +139,7 @@ class GreenWavePanel @JvmOverloads constructor(
         val GREEN = Color.parseColor("#2E7D32")
         val AMBER = Color.parseColor("#E08E0B")
         val GREY = Color.parseColor("#B3424242")
+        /** Alpha of an option outside the rider's speed range, or of a missing one. */
+        const val DIMMED = 0.45f
     }
 }

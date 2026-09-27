@@ -818,17 +818,20 @@ object GreenWaveController {
         val options = advice.options
         when {
             !advice.nextLightKnown -> builder.setSubText("? $where unbekannt").setColor(defaultColor)
-            options?.holdKmh != null -> builder.setSubText("✓ halten · $where").setColor(NOTIFICATION_GREEN)
+            options?.holdKmh != null -> {
+                val pair = if (options.slowerKmh != null || options.fasterKmh != null) " · ${speedPair(options)}" else ""
+                builder.setSubText("✓ halten$pair · $where").setColor(NOTIFICATION_GREEN)
+            }
             options != null && (options.slowerKmh != null || options.fasterKmh != null) ->
                 builder.setSubText("${speedPair(options)} · $where").setColor(NOTIFICATION_AMBER)
             else -> builder.setSubText("– kein Grün erreichbar · $where").setColor(defaultColor)
         }
     }
 
-    /** "▼ 16 | ▲ 20 km/h", leaving out a missing side. */
+    /** "▼ 16 | ▲ 20 km/h", leaving out a missing side; "(…)" around one outside the rider's range. */
     internal fun speedPair(options: SpeedOptions): String = listOfNotNull(
-        options.slowerKmh?.let { "▼ ${it.roundToInt()}" },
-        options.fasterKmh?.let { "▲ ${it.roundToInt()}" },
+        options.slowerKmh?.let { "▼ ${it.roundToInt()}".let { t -> if (options.slowerOutOfRange) "($t)" else t } },
+        options.fasterKmh?.let { "▲ ${it.roundToInt()}".let { t -> if (options.fasterOutOfRange) "($t)" else t } },
     ).joinToString(" | ") + " km/h"
 
     private val NOTIFICATION_GREEN = 0xFF2E7D32.toInt()
