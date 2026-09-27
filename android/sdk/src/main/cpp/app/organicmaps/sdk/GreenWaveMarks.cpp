@@ -1,10 +1,10 @@
 // greenWave: traffic lights (along the route, or nearby in tracking mode) on the map:
-// the map style's traffic light icon on a disc coloured by what greenWave knows about it.
+// the map style's traffic light icon with a dot coloured by what greenWave knows about it.
 // Uses the COLORED user-mark layer; nothing is persisted.
 //
 // ColoredMarkPoint (a bare coloured disc) never showed up on Android, so the marks
 // carry the same symbol as CoMaps' own route traffic lights (TrafficLightMark),
-// which does render; the disc sits behind it.
+// which does render, plus a tinted dot for the state.
 #include "app/organicmaps/sdk/Framework.hpp"
 
 #include "map/user_mark.hpp"
@@ -21,21 +21,30 @@ namespace
 int constexpr kMinZoom = 13;
 int constexpr kLargeIconZoom = 17;
 
-dp::Color StateColor(int state)
-{
-  switch (state)
-  {
-  case 1: return dp::Color(224, 142, 11, 255);  // some data, still learning (amber)
-  case 2: return dp::Color(46, 125, 50, 255);   // learned (green)
-  case 3: return dp::Color(21, 101, 192, 255);  // live data (blue)
-  default: return dp::Color(117, 117, 117, 255);  // no data (grey)
-  }
-}
-
+/// The map style's traffic light icon, like CoMaps' own route traffic lights.
 class GreenWaveLightMark : public UserMark
 {
 public:
   explicit GreenWaveLightMark(m2::PointD const & ptOrg) : UserMark(ptOrg, UserMark::Type::COLORED) {}
+
+  drape_ptr<SymbolNameZoomInfo> GetSymbolNames() const override
+  {
+    auto names = make_unique_dp<SymbolNameZoomInfo>();
+    names->emplace(kMinZoom, "traffic_signals");
+    names->emplace(kLargeIconZoom, "traffic_signals-l");
+    return names;
+  }
+
+  int GetMinZoom() const override { return kMinZoom; }
+};
+
+/// Small dot at the icon's upper right in the colour of what greenWave knows about
+/// the light. A tinted bookmark dot: bare coloured discs (ColoredMarkPoint) are not
+/// drawn on Android, tinted symbols are.
+class GreenWaveStateMark : public UserMark
+{
+public:
+  explicit GreenWaveStateMark(m2::PointD const & ptOrg) : UserMark(ptOrg, UserMark::Type::COLORED) {}
 
   void SetState(int state)
   {
@@ -46,28 +55,30 @@ public:
   drape_ptr<SymbolNameZoomInfo> GetSymbolNames() const override
   {
     auto names = make_unique_dp<SymbolNameZoomInfo>();
-    names->emplace(kMinZoom, "traffic_signals");
-    names->emplace(kLargeIconZoom, "traffic_signals-l");
+    names->emplace(kMinZoom, "bookmark-default-xs");
     return names;
   }
 
-  drape_ptr<ColoredSymbolZoomInfo> GetColoredSymbols() const override
+  df::ColorConstant GetColorConstant() const override
   {
-    auto const vs = static_cast<float>(df::VisualParams::Instance().GetVisualScale());
-    df::ColoredSymbolViewParams params;
-    params.m_shape = df::ColoredSymbolViewParams::Shape::Circle;
-    params.m_color = StateColor(m_state);
-    params.m_outlineColor = dp::Color::White();
-    params.m_outlineWidth = 1.5f * vs;
-    params.m_radiusInPixels = 10.0f * vs;
-    auto info = make_unique_dp<ColoredSymbolZoomInfo>();
-    info->m_needOverlay = false;
-    info->m_zoomInfo.emplace(kMinZoom, params);
-    return info;
+    switch (m_state)
+    {
+    case 1: return "BookmarkOrange";  // some data, still learning
+    case 2: return "BookmarkGreen";   // learned
+    case 3: return "BookmarkBlue";    // live data
+    default: return "BookmarkGray";   // no data
+    }
   }
 
+  m2::PointD GetPixelOffset() const override
+  {
+    auto const vs = df::VisualParams::Instance().GetVisualScale();
+    return {7.0 * vs, -7.0 * vs};
+  }
+
+  // Drawn over the traffic light icon instead of being cut off by it.
+  bool GetDepthTestEnabled() const override { return false; }
   int GetMinZoom() const override { return kMinZoom; }
-  dp::Anchor GetAnchor() const override { return dp::Center; }
 
 private:
   int m_state = 0;
@@ -91,8 +102,9 @@ JNIEXPORT void JNICALL Java_app_organicmaps_sdk_Framework_nativeSetGreenWaveMark
   jint * flags = env->GetIntArrayElements(states, nullptr);
   for (jsize i = 0; i < count; ++i)
   {
-    auto * mark = es.CreateUserMark<GreenWaveLightMark>(mercator::FromLatLon(coords[2 * i], coords[2 * i + 1]));
-    mark->SetState(flags[i]);
+    auto const point = mercator::FromLatLon(coords[2 * i], coords[2 * i + 1]);
+    es.CreateUserMark<GreenWaveLightMark>(point);
+    es.CreateUserMark<GreenWaveStateMark>(point)->SetState(flags[i]);
   }
   LOG(LINFO, ("greenWave marks:", count));
   env->ReleaseDoubleArrayElements(latLons, coords, JNI_ABORT);

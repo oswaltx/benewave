@@ -12,6 +12,7 @@ import androidx.core.app.NotificationCompat
 import app.organicmaps.sdk.Framework
 import app.organicmaps.sdk.Router
 import app.organicmaps.sdk.routing.RoutingController
+import dev.greenwave.shared.algorithm.Intersections
 import dev.greenwave.shared.algorithm.SpeedOptions
 import dev.greenwave.shared.algorithm.SpeedOptionsCalculator
 import dev.greenwave.shared.algorithm.SpeedRangeKmh
@@ -260,21 +261,27 @@ object GreenWaveController {
             .put("path_latlon", coords)
     }
 
-    /** Runs on [worker]; the Overpass request itself runs on [net]. */
+    /**
+     * Runs on [worker]; the lookups run on [net]: the downloaded map first, Overpass
+     * only where the map has no signals (not downloaded) and the path isn't covered yet.
+     */
     private fun loadLights(path: List<LatLng>, revision: Int) {
         lightPositions = emptyList()
-        if (!needsQuery(path)) {
-            selectLights(path, revision)
-            return
-        }
+        val query = needsQuery(path)
         net.execute {
             if (revision != requestedRevision) return@execute
-            val signals = try {
-                OverpassClient.trafficSignals(TrafficLightsAlongRoute.overpassQuery(path))
-            } catch (e: Exception) {
-                Log.w(TAG, "traffic light lookup failed", e)
-                null
+            val offline = offlineSignals { OfflineSignals.alongPath(path) }
+            val signals = when {
+                offline.isNotEmpty() -> offline
+                !query -> emptyList()
+                else -> try {
+                    OverpassClient.trafficSignals(TrafficLightsAlongRoute.overpassQuery(path))
+                } catch (e: Exception) {
+                    Log.w(TAG, "traffic light lookup failed", e)
+                    null
+                }
             }
+            Log.i(TAG, "route rev $revision: ${signals?.size ?: 0} signals from " + if (offline.isNotEmpty()) "map" else "Overpass")
             worker.execute {
                 if (revision != requestedRevision) return@execute
                 if (signals == null) {
@@ -673,11 +680,13 @@ object GreenWaveController {
         )
         areaLoading = true
         net.execute {
-            val lights = try {
-                OverpassClient.trafficSignals(query)
-            } catch (e: Exception) {
-                Log.w(TAG, "tracking area lookup failed", e)
-                null
+            val lights = offlineSignals { OfflineSignals.around(position, AREA_RADIUS_METERS.toDouble()) }.ifEmpty {
+                try {
+                    OverpassClient.trafficSignals(query)
+                } catch (e: Exception) {
+                    Log.w(TAG, "tracking area lookup failed", e)
+                    null
+                }
             }
             worker.execute {
                 areaLoading = false
@@ -733,17 +742,29 @@ object GreenWaveController {
             return
         }
         net.execute {
-            val signals = try {
-                OverpassClient.trafficSignals(TrafficLightsAlongRoute.overpassQuery(listOf(position, position)))
-            } catch (e: Exception) {
-                Log.w(TAG, "traffic light lookup at stop failed", e)
-                emptyList()
+            val signals = offlineSignals {
+                OfflineSignals.around(position, TrafficLightsAlongRoute.MAX_DISTANCE_TO_ROUTE_METERS * 2)
+            }.ifEmpty {
+                try {
+                    OverpassClient.trafficSignals(TrafficLightsAlongRoute.overpassQuery(listOf(position, position)))
+                } catch (e: Exception) {
+                    Log.w(TAG, "traffic light lookup at stop failed", e)
+                    emptyList()
+                }
             }
             worker.execute {
                 known.addAll(signals)
                 then(nearest(known.all(), position))
             }
         }
+    }
+
+    /** [net]: signals from the downloaded map, empty if that fails (e.g. no map there). */
+    private fun offlineSignals(lookup: () -> List<LatLng>): List<LatLng> = try {
+        lookup()
+    } catch (e: Throwable) {
+        Log.w(TAG, "map traffic signals failed", e)
+        emptyList()
     }
 
     private fun nearest(lights: List<LatLng>, position: LatLng): LatLng? = lights
@@ -879,15 +900,20 @@ object GreenWaveController {
         }
         val update = location.toUpdate()
         val progress = distanceAlongPath(current.path, update.position)
-        val ahead = current.trafficLights
-            .map { it to distanceAlongPath(current.path, it.position) - progress }
-            .filter { it.second > 0 && it.second <= LOOKAHEAD_METERS }
-            .sortedBy { it.second }
+        val learned = routeLearned
+        // One light per intersection, the known one if there is any (see Intersections).
+        val ahead = Intersections.representatives(
+            current.trafficLights
+                .map { it to distanceAlongPath(current.path, it.position) - progress }
+                .filter { it.second > 0 && it.second <= LOOKAHEAD_METERS }
+                .sortedBy { it.second },
+            isKnown = { it.position in learned },
+        )
         val next = ahead.firstOrNull()
             ?: return State(LightsStatus.READY, current.trafficLights.size, learnedCount, Advice(null, false, null), liveCount)
-        val known = next.first.position in routeLearned
+        val known = next.first.position in learned
         // Only learned lights take part; an unknown one further on must not steer the speed either.
-        val learnedAhead = ahead.map { it.first }.takeWhile { it.position in routeLearned }
+        val learnedAhead = ahead.map { it.first }.takeWhile { it.position in learned }
         val options = if (!known) null else SpeedOptionsCalculator.compute(
             route = current.copy(trafficLights = learnedAhead),
             currentPosition = update.position,

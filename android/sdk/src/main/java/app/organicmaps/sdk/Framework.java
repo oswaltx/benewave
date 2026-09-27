@@ -225,6 +225,8 @@ public class Framework
   // greenWave: traffic lights as coloured dots (states: 0 no data, 1 learning, 2 learned, 3 live).
   public static native void nativeSetGreenWaveMarks(double[] latLons, int[] states);
   public static native void nativeClearGreenWaveMarks();
+  // greenWave: highway=traffic_signals nodes from the downloaded maps in the box, as lat/lon pairs.
+  public static native double[] nativeGreenWaveTrafficSignals(double minLat, double minLon, double maxLat, double maxLon);
 
   @Nullable
   public static native final int[] nativeGenerateRouteAltitudeChartBits(int width, int height,
