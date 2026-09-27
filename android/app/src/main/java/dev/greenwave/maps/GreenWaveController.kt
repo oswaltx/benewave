@@ -106,7 +106,7 @@ object GreenWaveController {
     // so a reroute near the old route doesn't hit the public server again.
     private val knownSignals = LinkedHashSet<LatLng>()
     private val coveredPaths = mutableListOf<List<LatLng>>()
-    private var requestedRevision = -1
+    @Volatile private var requestedRevision = -1
     private var failedAttempts = 0
 
     // Worker-only state for learning.
@@ -167,6 +167,8 @@ object GreenWaveController {
     private var areaLights: List<LatLng> = emptyList()
     private var areaCenter: LatLng? = null
     private var areaFailedAt = 0L
+    /** Worker-only: an area request is on [net]; don't start a second one. */
+    private var areaLoading = false
     private const val AREA_RADIUS_METERS = 3_000
     private const val AREA_REFRESH_METERS = 1_500.0
     @Volatile private var profileRange: SpeedRangeKmh? = null
@@ -179,6 +181,13 @@ object GreenWaveController {
     private var host: WeakReference<Context>? = null
 
     private val worker = Executors.newSingleThreadExecutor()
+    /**
+     * Network requests only (Overpass, Hamburg live data). A slow server can take
+     * minutes across retries and mirrors; on [worker] that would stall every fix,
+     * and on one shared thread a hanging stop lookup would hold up the live data.
+     * Results are handed back to [worker], which owns all state.
+     */
+    private val net = Executors.newCachedThreadPool()
     private val main = Handler(Looper.getMainLooper())
     private var initialized = false
 
@@ -251,15 +260,37 @@ object GreenWaveController {
             .put("path_latlon", coords)
     }
 
-    /** Runs on [worker]. */
+    /** Runs on [worker]; the Overpass request itself runs on [net]. */
     private fun loadLights(path: List<LatLng>, revision: Int) {
         lightPositions = emptyList()
-        val status = try {
-            if (needsQuery(path)) {
-                val signals = OverpassClient.trafficSignals(TrafficLightsAlongRoute.overpassQuery(path))
+        if (!needsQuery(path)) {
+            selectLights(path, revision)
+            return
+        }
+        net.execute {
+            if (revision != requestedRevision) return@execute
+            val signals = try {
+                OverpassClient.trafficSignals(TrafficLightsAlongRoute.overpassQuery(path))
+            } catch (e: Exception) {
+                Log.w(TAG, "traffic light lookup failed", e)
+                null
+            }
+            worker.execute {
+                if (revision != requestedRevision) return@execute
+                if (signals == null) {
+                    postLightsStatus(path, revision, LightsStatus.FAILED)
+                    return@execute
+                }
                 knownSignals.addAll(signals)
                 coveredPaths.add(path)
+                selectLights(path, revision)
             }
+        }
+    }
+
+    /** Worker: the route's lights from the signals known so far. */
+    private fun selectLights(path: List<LatLng>, revision: Int) {
+        val status = try {
             lightsPath = path
             lightPositions = TrafficLightsAlongRoute.select(path, knownSignals.toList())
             knownLights?.addAll(lightPositions)
@@ -272,6 +303,10 @@ object GreenWaveController {
             Log.w(TAG, "traffic light lookup failed", e)
             LightsStatus.FAILED
         }
+        postLightsStatus(path, revision, status)
+    }
+
+    private fun postLightsStatus(path: List<LatLng>, revision: Int, status: LightsStatus) {
         main.post {
             if (revision != requestedRevision) return@post
             lightsStatus = status
@@ -295,31 +330,41 @@ object GreenWaveController {
     /**
      * Worker: timing from Hamburg's live signal data for the route's lights in
      * Hamburg, then again every [LIVE_REFRESH_MS] while the route is active.
-     * A failed request keeps the previous values.
+     * A failed request keeps the previous values. The requests run on [net].
      */
     private fun refreshLive(revision: Int) {
         val positions = lightPositions.filter { HamburgSignalsClient.covers(it) }
         if (positions.isEmpty()) return
         val path = lightsPath
-        val now = System.currentTimeMillis() / 1000
-        val found = mutableMapOf<LatLng, TrafficLight>()
-        try {
-            for (batch in positions.chunked(LIVE_BATCH)) {
-                val connections = HamburgSignalsClient.laneConnections(batch, now)
-                for (position in batch) {
-                    val lane = LaneConnectionMatcher.match(path, position, connections) ?: continue
-                    LiveSignalCycle.estimate(position, lane.observations, now, lane.cycleStarts)?.let { found[position] = it }
-                }
+        net.execute {
+            if (revision != requestedRevision) return@execute
+            val now = System.currentTimeMillis() / 1000
+            val batches = try {
+                positions.chunked(LIVE_BATCH).map { it to HamburgSignalsClient.laneConnections(it, now) }
+            } catch (e: Exception) {
+                Log.w(TAG, "Hamburg live signals failed", e)
+                null
             }
-            liveLights = found
-            Log.i(TAG, "live timing for ${found.size} of ${positions.size} Hamburg lights")
-            publishRoute(revision)
-        } catch (e: Exception) {
-            Log.w(TAG, "Hamburg live signals failed", e)
+            worker.execute {
+                if (revision != requestedRevision) return@execute
+                if (batches != null) {
+                    val found = mutableMapOf<LatLng, TrafficLight>()
+                    for ((batch, connections) in batches) {
+                        for (position in batch) {
+                            val lane = LaneConnectionMatcher.match(path, position, connections) ?: continue
+                            LiveSignalCycle.estimate(position, lane.observations, now, lane.cycleStarts)?.let { found[position] = it }
+                        }
+                    }
+                    liveLights = found
+                    Log.i(TAG, "live timing for ${found.size} of ${positions.size} Hamburg lights: " +
+                        found.keys.joinToString { "%.5f,%.5f".format(java.util.Locale.ROOT, it.latitude, it.longitude) })
+                    publishRoute(revision)
+                }
+                main.postDelayed({
+                    if (revision == requestedRevision) worker.execute { if (revision == requestedRevision) refreshLive(revision) }
+                }, LIVE_REFRESH_MS)
+            }
         }
-        main.postDelayed({
-            if (revision == requestedRevision) worker.execute { if (revision == requestedRevision) refreshLive(revision) }
-        }, LIVE_REFRESH_MS)
     }
 
     /** Worker: combine current light positions with what has been learned so far. */
@@ -382,12 +427,13 @@ object GreenWaveController {
             log.append(event)
             loggedStops = log.all().size
             Log.i(TAG, "stop ${event.durationSec}s at ${event.position}")
-            val light = StopEventMatcher.match(event.position, lightPositions) ?: lookUpLightNear(event.position)
-            recordStop(event, light)
-            if (lightPositions.isNotEmpty()) publishRoute(revision)
-            val text = describeStop(event, light)
-            navEvent = text to System.currentTimeMillis()
-            main.post { hostActivity()?.let { Toast.makeText(it, text, Toast.LENGTH_SHORT).show() } }
+            withLightNear(event.position, StopEventMatcher.match(event.position, lightPositions)) { light ->
+                recordStop(event, light)
+                if (lightPositions.isNotEmpty()) publishRoute(revision)
+                val text = describeStop(event, light)
+                navEvent = text to System.currentTimeMillis()
+                main.post { hostActivity()?.let { Toast.makeText(it, text, Toast.LENGTH_SHORT).show() } }
+            }
         }
     }
 
@@ -585,16 +631,17 @@ object GreenWaveController {
             loggedStops = store?.all()?.size ?: loggedStops
             trackingStops++
             Log.i(TAG, "tracking stop ${event.durationSec}s at ${event.position}")
-            val light = nearest(areaLights, event.position) ?: lookUpLightNear(event.position)
-            recordStop(event, light)
-            if (light != null) {
-                trackingLightSet.add(light)
-                trackingLights = trackingLightSet.size
+            withLightNear(event.position, nearest(areaLights, event.position)) { light ->
+                recordStop(event, light)
+                if (light != null) {
+                    trackingLightSet.add(light)
+                    trackingLights = trackingLightSet.size
+                }
+                trackingLastEvent = describeStop(event, light)
+                trackingLastEventAt = System.currentTimeMillis()
+                refreshAreaMarks()
+                main.post { onTrackingEvent?.invoke(true) }
             }
-            trackingLastEvent = describeStop(event, light)
-            trackingLastEventAt = System.currentTimeMillis()
-            refreshAreaMarks()
-            main.post { onTrackingEvent?.invoke(true) }
         }
     }
 
@@ -615,6 +662,7 @@ object GreenWaveController {
 
     /** Worker: (re)load the lights around [position] when the rider has moved far enough. */
     private fun updateArea(position: LatLng) {
+        if (areaLoading) return
         val center = areaCenter
         if (center != null && distanceMeters(center, position) < AREA_REFRESH_METERS) return
         if (System.currentTimeMillis() - areaFailedAt < 60_000L) return
@@ -623,14 +671,27 @@ object GreenWaveController {
             "[out:json][timeout:25];node[\"highway\"=\"traffic_signals\"](around:%d,%.6f,%.6f);out;",
             AREA_RADIUS_METERS, position.latitude, position.longitude,
         )
-        try {
-            areaLights = OverpassClient.trafficSignals(query)
-            areaCenter = position
-            Log.i(TAG, "tracking area: ${areaLights.size} traffic lights within $AREA_RADIUS_METERS m")
-            refreshAreaMarks()
-        } catch (e: Exception) {
-            areaFailedAt = System.currentTimeMillis()
-            Log.w(TAG, "tracking area lookup failed", e)
+        areaLoading = true
+        net.execute {
+            val lights = try {
+                OverpassClient.trafficSignals(query)
+            } catch (e: Exception) {
+                Log.w(TAG, "tracking area lookup failed", e)
+                null
+            }
+            worker.execute {
+                areaLoading = false
+                // Tracking ended while the request ran: stopTracking() already cleared the area.
+                if (!GreenWaveTrackingService.running) return@execute
+                if (lights == null) {
+                    areaFailedAt = System.currentTimeMillis()
+                    return@execute
+                }
+                areaLights = lights
+                areaCenter = position
+                Log.i(TAG, "tracking area: ${areaLights.size} traffic lights within $AREA_RADIUS_METERS m")
+                refreshAreaMarks()
+            }
         }
     }
 
@@ -660,18 +721,29 @@ object GreenWaveController {
     /**
      * Worker: without a route nobody asked Overpass about this spot, so look for
      * a signal next to the stop and remember it; then the stop counts for that
-     * light in the "Ampeldaten" list and on later routes.
+     * light in the "Ampeldaten" list and on later routes. [then] runs on the
+     * worker, right away when [match] or a known light fits, otherwise after the
+     * request on [net].
      */
-    private fun lookUpLightNear(position: LatLng): LatLng? {
-        val known = knownLights ?: return null
-        nearest(known.all(), position)?.let { return it }
-        try {
-            val signals = OverpassClient.trafficSignals(TrafficLightsAlongRoute.overpassQuery(listOf(position, position)))
-            known.addAll(signals)
-        } catch (e: Exception) {
-            Log.w(TAG, "traffic light lookup at stop failed", e)
+    private fun withLightNear(position: LatLng, match: LatLng?, then: (LatLng?) -> Unit) {
+        val known = knownLights
+        val light = match ?: known?.let { nearest(it.all(), position) }
+        if (light != null || known == null) {
+            then(light)
+            return
         }
-        return nearest(known.all(), position)
+        net.execute {
+            val signals = try {
+                OverpassClient.trafficSignals(TrafficLightsAlongRoute.overpassQuery(listOf(position, position)))
+            } catch (e: Exception) {
+                Log.w(TAG, "traffic light lookup at stop failed", e)
+                emptyList()
+            }
+            worker.execute {
+                known.addAll(signals)
+                then(nearest(known.all(), position))
+            }
+        }
     }
 
     private fun nearest(lights: List<LatLng>, position: LatLng): LatLng? = lights
