@@ -500,6 +500,7 @@ public class MwmActivity extends BaseMwmFragmentActivity
 
     setContentView(R.layout.activity_map);
     makeNavigationBarTransparentInLightMode();
+    dev.greenwave.maps.GreenWaveMapOverlay.attach(this); // greenWave
 
     mPlacePageViewModel = new ViewModelProvider(this).get(PlacePageViewModel.class);
     mMapButtonsViewModel = new ViewModelProvider(this).get(MapButtonsViewModel.class);

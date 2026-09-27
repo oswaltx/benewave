@@ -60,7 +60,7 @@ class GreenWaveTrackingService : Service() {
         running = true
         startedAt = SystemClock.elapsedRealtime()
         GreenWaveController.startTracking(this)
-        GreenWaveController.onTrackingEvent = { notifyEvent() }
+        GreenWaveController.onTrackingEvent = { alert -> notifyEvent(alert) }
         requestUpdates()
         return START_NOT_STICKY
     }
@@ -75,6 +75,7 @@ class GreenWaveTrackingService : Service() {
         last?.let { if (location.hasAccuracy() && location.accuracy < 30f) distanceMeters += it.distanceTo(location) }
         if (!location.hasAccuracy() || location.accuracy < 30f) last = location
         GreenWaveController.onTrackLocation(location)
+        summary()
         val now = SystemClock.elapsedRealtime()
         if (now - lastNotified >= 10_000L) {
             lastNotified = now
@@ -82,12 +83,12 @@ class GreenWaveTrackingService : Service() {
         }
     }
 
-    /** A stop was registered: update right away and alert once, so the rider notices. */
-    private fun notifyEvent() {
+    /** A stop ([alert]) or pass-through was registered: update right away; stops also alert and toast. */
+    private fun notifyEvent(alert: Boolean) {
         if (!running) return
         lastNotified = SystemClock.elapsedRealtime()
-        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(alert = true))
-        GreenWaveController.trackingLastEvent?.let { Toast.makeText(this, it, Toast.LENGTH_SHORT).show() }
+        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification(alert = alert))
+        if (alert) GreenWaveController.trackingLastEvent?.let { Toast.makeText(this, it, Toast.LENGTH_SHORT).show() }
     }
 
     override fun onDestroy() {
@@ -95,6 +96,7 @@ class GreenWaveTrackingService : Service() {
         (getSystemService(Context.LOCATION_SERVICE) as LocationManager).removeUpdates(listener)
         if (running) GreenWaveController.stopTracking()
         running = false
+        summary = ""
         super.onDestroy()
     }
 
@@ -122,8 +124,9 @@ class GreenWaveTrackingService : Service() {
     private fun summary(): String {
         val minutes = if (startedAt == 0L) 0 else (SystemClock.elapsedRealtime() - startedAt) / 60_000
         val km = String.format(Locale.GERMAN, "%.1f", distanceMeters / 1000)
-        return "$minutes min · $km km · ${GreenWaveController.trackingStops} Stopps · " +
-            "${GreenWaveController.trackingLights} Ampeln"
+        return ("$minutes min · $km km · ${GreenWaveController.trackingStops} Stopps · " +
+            "${GreenWaveController.trackingPasses} Grün · ${GreenWaveController.trackingLights} Ampeln")
+            .also { summary = it }
     }
 
     private fun createChannel() {
@@ -139,6 +142,10 @@ class GreenWaveTrackingService : Service() {
         private const val ACTION_STOP = "dev.greenwave.maps.STOP_TRACKING"
 
         @Volatile var running = false
+            private set
+
+        /** For the map overlay: "12 min · 3,4 km · 2 Stopps · 5 Grün · 6 Ampeln". */
+        @Volatile var summary: String = ""
             private set
 
         fun start(context: Context) {

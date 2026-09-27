@@ -154,8 +154,21 @@ object GreenWaveController {
     /** Short line about the last stop, e.g. "Ampel registriert · 3 Stopps dort". */
     @Volatile var trackingLastEvent: String? = null
         private set
-    /** Set by [GreenWaveTrackingService]; runs on main after each stop. */
-    @Volatile var onTrackingEvent: (() -> Unit)? = null
+    /** Set by [GreenWaveTrackingService]; runs on main after each stop (alert = true) or pass-through. */
+    @Volatile var onTrackingEvent: ((alert: Boolean) -> Unit)? = null
+    /** Tracking mode: when the last stop or pass was registered (for the map overlay's flash). */
+    @Volatile var trackingLastEventAt = 0L
+        private set
+    @Volatile var trackingPasses = 0
+        private set
+
+    // Tracking mode: all traffic lights around the rider (Overpass), shown on the map
+    // with their learning state and used for pass/stop detection. Worker-only.
+    private var areaLights: List<LatLng> = emptyList()
+    private var areaCenter: LatLng? = null
+    private var areaFailedAt = 0L
+    private const val AREA_RADIUS_METERS = 3_000
+    private const val AREA_REFRESH_METERS = 1_500.0
     @Volatile private var profileRange: SpeedRangeKmh? = null
 
     /** For the settings dialog: how much has been logged on this device. */
@@ -207,7 +220,7 @@ object GreenWaveController {
             if (wasActive) Framework.nativeClearGreenWaveMarks()
             lightsStatus = LightsStatus.NO_ROUTE
             requestedRevision = -1
-            if (wasActive) worker.execute { suggestedRoute = null; finishRide() }
+            if (wasActive) worker.execute { suggestedRoute = null; finishRide(); refreshAreaMarks() }
             return
         }
         if (geometry.mRevision == requestedRevision) return
@@ -337,13 +350,15 @@ object GreenWaveController {
         learnedPositions = learnedSet
         val count = learnedSet.size
         val liveNow = lightPositions.count { it in live }
+        val withData = lightsWithData()
+        val positions = lightPositions
         main.post {
             if (revision == requestedRevision) {
                 route = Route(path = path, trafficLights = lights)
                 routeLearned = learnedSet
                 learnedCount = count
                 liveCount = liveNow
-                showMarks(lights, learnedSet)
+                showMarks(positions.map { it to markState(it, learnedSet, live.keys, withData) })
             }
         }
     }
@@ -395,13 +410,23 @@ object GreenWaveController {
             recentBearings.addLast(update.epochSec to bearing)
             while (recentBearings.size > 180) recentBearings.removeFirst()
         }
-        val candidates = (lightPositions + knownLights?.all().orEmpty())
+        val candidates = (lightPositions + areaLights + knownLights?.all().orEmpty())
             .filter { distanceMeters(it, update.position) < 100.0 }
             .distinct()
         val passes = passDetector.onUpdate(update, candidates)
         if (passes.isNotEmpty()) {
             lightEvents?.addAll(passes)
             Log.i(TAG, "passed on green: ${passes.size}")
+            if (GreenWaveTrackingService.running && route == null) {
+                trackingPasses += passes.size
+                passes.forEach { trackingLightSet.add(it.light) }
+                trackingLights = trackingLightSet.size
+                val there = lightEvents?.at(passes.last().light).orEmpty().size
+                trackingLastEvent = "Grün-Durchfahrt registriert · $there Daten dort"
+                trackingLastEventAt = System.currentTimeMillis()
+                refreshAreaMarks()
+                main.post { onTrackingEvent?.invoke(false) }
+            }
         }
     }
 
@@ -529,6 +554,8 @@ object GreenWaveController {
         trackingStops = 0
         trackingLights = 0
         trackingLastEvent = null
+        trackingLastEventAt = 0L
+        trackingPasses = 0
         val appContext = context.applicationContext
         worker.execute {
             track?.close()
@@ -550,6 +577,7 @@ object GreenWaveController {
         worker.execute {
             track?.append(location)
             if (navigating) return@execute
+            updateArea(update.position)
             trackRide(update)
             observeLights(update)
             val event = stopDetector.onUpdate(update) ?: return@execute
@@ -557,14 +585,16 @@ object GreenWaveController {
             loggedStops = store?.all()?.size ?: loggedStops
             trackingStops++
             Log.i(TAG, "tracking stop ${event.durationSec}s at ${event.position}")
-            val light = lookUpLightNear(event.position)
+            val light = nearest(areaLights, event.position) ?: lookUpLightNear(event.position)
             recordStop(event, light)
             if (light != null) {
                 trackingLightSet.add(light)
                 trackingLights = trackingLightSet.size
             }
             trackingLastEvent = describeStop(event, light)
-            main.post { onTrackingEvent?.invoke() }
+            trackingLastEventAt = System.currentTimeMillis()
+            refreshAreaMarks()
+            main.post { onTrackingEvent?.invoke(true) }
         }
     }
 
@@ -574,8 +604,57 @@ object GreenWaveController {
             track?.close()
             Log.i(TAG, "tracking stopped: ${track?.file?.name}")
             track = null
-            if (route == null) finishRide(askRating = false)
+            areaCenter = null
+            areaLights = emptyList()
+            if (route == null) {
+                finishRide(askRating = false)
+                main.post { if (route == null) Framework.nativeClearGreenWaveMarks() }
+            }
         }
+    }
+
+    /** Worker: (re)load the lights around [position] when the rider has moved far enough. */
+    private fun updateArea(position: LatLng) {
+        val center = areaCenter
+        if (center != null && distanceMeters(center, position) < AREA_REFRESH_METERS) return
+        if (System.currentTimeMillis() - areaFailedAt < 60_000L) return
+        val query = String.format(
+            java.util.Locale.ROOT,
+            "[out:json][timeout:25];node[\"highway\"=\"traffic_signals\"](around:%d,%.6f,%.6f);out;",
+            AREA_RADIUS_METERS, position.latitude, position.longitude,
+        )
+        try {
+            areaLights = OverpassClient.trafficSignals(query)
+            areaCenter = position
+            Log.i(TAG, "tracking area: ${areaLights.size} traffic lights within $AREA_RADIUS_METERS m")
+            refreshAreaMarks()
+        } catch (e: Exception) {
+            areaFailedAt = System.currentTimeMillis()
+            Log.w(TAG, "tracking area lookup failed", e)
+        }
+    }
+
+    /**
+     * Worker: dots for all lights around the rider in tracking mode — grey no
+     * data yet, amber some data, green learned — so uncertain ones can be ridden
+     * on purpose. Only while no route is shown (the route's own dots win).
+     */
+    private fun refreshAreaMarks() {
+        if (!GreenWaveTrackingService.running) return
+        val lights = areaLights
+        if (lights.isEmpty()) return
+        val byLight = lightEvents?.all().orEmpty().groupBy { it.light }
+        val now = System.currentTimeMillis() / 1000
+        val marks = lights.map { position ->
+            val events = byLight[position].orEmpty()
+            val state = when {
+                events.isEmpty() -> MARK_NO_DATA
+                events.size >= ObservationCycleEstimator.MIN_EVENTS && learnedProgram(position, null, now) != null -> MARK_LEARNED
+                else -> MARK_LEARNING
+            }
+            position to state
+        }
+        main.post { if (route == null && GreenWaveTrackingService.running) showMarks(marks) }
     }
 
     /**
@@ -669,14 +748,30 @@ object GreenWaveController {
         bearingDegrees = if (hasBearing()) bearing else null,
     )
 
-    /** Main thread: coloured dots for the route's lights (green = learned cycle). */
-    private fun showMarks(lights: List<TrafficLight>, learned: Set<LatLng>) {
-        val coords = DoubleArray(lights.size * 2)
-        lights.forEachIndexed { i, light ->
-            coords[2 * i] = light.position.latitude
-            coords[2 * i + 1] = light.position.longitude
+    /** Map dot colours, see GreenWaveMarks.cpp. */
+    private const val MARK_NO_DATA = 0
+    private const val MARK_LEARNING = 1
+    private const val MARK_LEARNED = 2
+    private const val MARK_LIVE = 3
+
+    private fun markState(position: LatLng, learned: Set<LatLng>, live: Set<LatLng>, withData: Set<LatLng>) = when (position) {
+        in live -> MARK_LIVE
+        in learned -> MARK_LEARNED
+        in withData -> MARK_LEARNING
+        else -> MARK_NO_DATA
+    }
+
+    /** Worker: lights with at least one logged event (stop or pass). */
+    private fun lightsWithData(): Set<LatLng> = lightEvents?.all().orEmpty().mapTo(HashSet()) { it.light }
+
+    /** Main thread: coloured dots on the map. */
+    private fun showMarks(marks: List<Pair<LatLng, Int>>) {
+        val coords = DoubleArray(marks.size * 2)
+        marks.forEachIndexed { i, (position, _) ->
+            coords[2 * i] = position.latitude
+            coords[2 * i + 1] = position.longitude
         }
-        Framework.nativeSetGreenWaveMarks(coords, BooleanArray(lights.size) { lights[it].position in learned })
+        Framework.nativeSetGreenWaveMarks(coords, IntArray(marks.size) { marks[it].second })
     }
 
     /** Direction of travel on [path] at [position] (degrees, 0 = north), from 10 m before to 10 m after it. */
