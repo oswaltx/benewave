@@ -191,10 +191,10 @@ internal object GreenWaveDialogs {
                 val what = when {
                     s.trusted -> "Zyklus ${s.cycleSec} s, grün ${s.greenSec} s, sicher ${(s.confidence!! * 100).roundToInt()} %"
                     s.cycleSec != null -> "vorläufig ${s.cycleSec} s (sicher ${(s.confidence!! * 100).roundToInt()} %)"
-                    s.stops > 0 -> "noch zu wenig Stopps"
-                    else -> "noch keine Stopps"
+                    s.stops + s.passes > 0 -> "noch zu wenig Daten"
+                    else -> "noch keine Daten"
                 }
-                "${if (s.trusted) "●" else "○"} $what · ${s.stops} Stopps\n$where"
+                "${if (s.trusted) "●" else "○"} $what · ${s.stops} Stopps, ${s.passes} Durchfahrten\n$where"
             }
             MaterialAlertDialogBuilder(activity)
                 .setTitle("Ampeldaten: $learned von ${stats.size} gelernt")

@@ -19,6 +19,7 @@ import dev.greenwave.shared.data.RandomTrafficTimingGenerator
 import dev.greenwave.shared.geo.LatLng
 import dev.greenwave.shared.geo.distanceAlongPath
 import dev.greenwave.shared.geo.distanceMeters
+import dev.greenwave.shared.geo.pointAtDistanceAlongPath
 import dev.greenwave.shared.geo.distanceToPath
 import dev.greenwave.shared.live.LaneConnectionMatcher
 import dev.greenwave.shared.live.LiveSignalCycle
@@ -26,10 +27,13 @@ import dev.greenwave.shared.location.LocationUpdate
 import dev.greenwave.shared.model.Route
 import dev.greenwave.shared.model.TrafficLight
 import dev.greenwave.shared.routing.TrafficLightsAlongRoute
+import dev.greenwave.shared.tracking.LightEvent
+import dev.greenwave.shared.tracking.ObservationCycleEstimator
+import dev.greenwave.shared.tracking.PassDetector
+import dev.greenwave.shared.tracking.RhythmEstimate
 import dev.greenwave.shared.tracking.StopDetector
 import dev.greenwave.shared.tracking.StopEvent
 import dev.greenwave.shared.tracking.StopEventMatcher
-import dev.greenwave.shared.tracking.TrafficLightRhythmEstimator
 import org.json.JSONArray
 import org.json.JSONObject
 import java.lang.ref.WeakReference
@@ -41,10 +45,12 @@ import kotlin.math.roundToInt
  * route is built it looks up the traffic lights along it (Overpass), and on
  * every location fix it computes the speed advice for the navigation panel.
  *
- * While navigating, every fix also goes through a [StopDetector]; detected stops
- * are logged on the device and, once a light has enough of them, its measured
- * cycle ([TrafficLightRhythmEstimator]) replaces the placeholder program
- * ([RandomTrafficTimingGenerator]) that every light starts with.
+ * While riding (navigation or tracking mode), every fix also goes through a
+ * [StopDetector] and a [PassDetector]; stops and pass-throughs are logged per
+ * light and direction ([LightEventStore]). Once a light's program can be
+ * learned from them ([ObservationCycleEstimator]) or comes from a live source
+ * (Hamburg), it replaces the placeholder ([RandomTrafficTimingGenerator]),
+ * which is never used for advice.
  */
 object GreenWaveController {
     private const val TAG = "GreenWave"
@@ -105,7 +111,11 @@ object GreenWaveController {
 
     // Worker-only state for learning.
     private var store: StopEventStore? = null
+    private var lightEvents: LightEventStore? = null
     private val stopDetector = StopDetector()
+    private val passDetector = PassDetector()
+    /** Recent (epochSec, bearing) of moving fixes, for the approach direction of a stop. */
+    private val recentBearings = ArrayDeque<Pair<Long, Float>>()
     private var lightPositions: List<LatLng> = emptyList()
     private var lightsPath: List<LatLng> = emptyList()
     private var lights: List<TrafficLight> = emptyList()
@@ -177,6 +187,7 @@ object GreenWaveController {
         settings = GreenWaveSettings(appContext)
         worker.execute {
             store = StopEventStore(appContext).also { loggedStops = it.all().size }
+            lightEvents = LightEventStore(appContext)
             knownLights = KnownLights(appContext)
             rideLog = RideLog(appContext).also {
                 profileRange = it.profileRange()
@@ -300,7 +311,8 @@ object GreenWaveController {
 
     /** Worker: combine current light positions with what has been learned so far. */
     private fun publishRoute(revision: Int) {
-        val events = store?.all().orEmpty()
+        val path = lightsPath
+        val now = System.currentTimeMillis() / 1000
         val learnedSet = mutableSetOf<LatLng>()
         val live = liveLights
         val lights = lightPositions.map { position ->
@@ -308,8 +320,7 @@ object GreenWaveController {
                 learnedSet.add(position)
                 return@map it
             }
-            val stops = events.filter { StopEventMatcher.match(it.position, lightPositions) == position }
-            val estimate = TrafficLightRhythmEstimator.estimate(stops)
+            val estimate = learnedProgram(position, approachBearing(path, position), now)
             if (estimate != null && estimate.confidence >= MIN_CONFIDENCE) {
                 learnedSet.add(position)
                 TrafficLight(
@@ -324,7 +335,6 @@ object GreenWaveController {
         }
         this.lights = lights
         learnedPositions = learnedSet
-        val path = lightsPath
         val count = learnedSet.size
         val liveNow = lightPositions.count { it in live }
         main.post {
@@ -351,13 +361,15 @@ object GreenWaveController {
             if (track == null) openNavTrack(update.epochSec)
             if (trackByNav) track?.append(fix)
             trackRide(update)
+            observeLights(update)
             val event = stopDetector.onUpdate(update) ?: return@execute
             val log = store ?: return@execute
             log.append(event)
             loggedStops = log.all().size
             Log.i(TAG, "stop ${event.durationSec}s at ${event.position}")
-            if (lightPositions.isNotEmpty()) publishRoute(revision)
             val light = StopEventMatcher.match(event.position, lightPositions) ?: lookUpLightNear(event.position)
+            recordStop(event, light)
+            if (lightPositions.isNotEmpty()) publishRoute(revision)
             val text = describeStop(event, light)
             navEvent = text to System.currentTimeMillis()
             main.post { hostActivity()?.let { Toast.makeText(it, text, Toast.LENGTH_SHORT).show() } }
@@ -375,6 +387,41 @@ object GreenWaveController {
     /** Last stop during navigation and when it happened; shown in the notification for a while. */
     @Volatile private var navEvent: Pair<String, Long>? = null
     private const val NAV_EVENT_SHOW_MS = 20_000L
+
+    /** Worker: remember the heading of moving fixes and log pass-throughs at nearby lights. */
+    private fun observeLights(update: LocationUpdate) {
+        val bearing = update.bearingDegrees
+        if (bearing != null && update.speedKmh >= RideLog.MOVING_KMH) {
+            recentBearings.addLast(update.epochSec to bearing)
+            while (recentBearings.size > 180) recentBearings.removeFirst()
+        }
+        val candidates = (lightPositions + knownLights?.all().orEmpty())
+            .filter { distanceMeters(it, update.position) < 100.0 }
+            .distinct()
+        val passes = passDetector.onUpdate(update, candidates)
+        if (passes.isNotEmpty()) {
+            lightEvents?.addAll(passes)
+            Log.i(TAG, "passed on green: ${passes.size}")
+        }
+    }
+
+    /** Worker: a stop at [light] as learning events, with the direction the rider came from. */
+    private fun recordStop(event: StopEvent, light: LatLng?) {
+        if (light == null) return
+        val heading = recentBearings.lastOrNull { it.first <= event.startEpochSec }?.second?.roundToInt()
+        lightEvents?.addAll(LightEvent.fromStop(event, light, heading))
+    }
+
+    /** Worker: the learned program for [position] when approached with [headingDeg], or null. */
+    private fun learnedProgram(position: LatLng, headingDeg: Double?, nowEpochSec: Long): RhythmEstimate? {
+        val events = lightEvents?.at(position).orEmpty().filter { it.sameApproach(headingDeg) }
+        // Stops logged before light events existed count too (direction unknown).
+        val since = lightEvents?.all()?.firstOrNull()?.epochSec ?: Long.MAX_VALUE
+        val legacy = store?.all().orEmpty()
+            .filter { it.endEpochSec < since && StopEventMatcher.match(it.position, listOf(position)) == position }
+            .flatMap { LightEvent.fromStop(it, position, null) }
+        return ObservationCycleEstimator.estimate(events + legacy, nowEpochSec)
+    }
 
     /** Worker: one line for a registered stop, e.g. "Ampel registriert (35 s) · 3 Stopps dort". */
     private fun describeStop(event: StopEvent, light: LatLng?): String {
@@ -445,6 +492,7 @@ object GreenWaveController {
     data class LightStats(
         val position: LatLng,
         val stops: Int,
+        val passes: Int = 0,
         val cycleSec: Int?,
         val greenSec: Int?,
         val confidence: Double?,
@@ -457,18 +505,20 @@ object GreenWaveController {
             val positions = knownLights?.all().orEmpty()
             val events = store?.all().orEmpty()
             val grouped = events.groupBy { StopEventMatcher.match(it.position, positions) }
+            val now = System.currentTimeMillis() / 1000
             val stats = positions.map { position ->
                 val stops = grouped[position].orEmpty()
-                val estimate = TrafficLightRhythmEstimator.estimate(stops)
+                val estimate = learnedProgram(position, null, now)
                 LightStats(
                     position = position,
                     stops = stops.size,
+                    passes = lightEvents?.at(position).orEmpty().count { it.kind == LightEvent.Kind.PASS_GREEN },
                     cycleSec = estimate?.cycleLengthSec,
                     greenSec = estimate?.greenDurationSec,
                     confidence = estimate?.confidence,
                     trusted = estimate != null && estimate.confidence >= MIN_CONFIDENCE,
                 )
-            }.sortedWith(compareByDescending<LightStats> { it.trusted }.thenByDescending { it.stops })
+            }.sortedWith(compareByDescending<LightStats> { it.trusted }.thenByDescending { it.stops + it.passes })
             main.post { onResult(stats) }
         }
     }
@@ -501,12 +551,14 @@ object GreenWaveController {
             track?.append(location)
             if (navigating) return@execute
             trackRide(update)
+            observeLights(update)
             val event = stopDetector.onUpdate(update) ?: return@execute
             store?.append(event)
             loggedStops = store?.all()?.size ?: loggedStops
             trackingStops++
             Log.i(TAG, "tracking stop ${event.durationSec}s at ${event.position}")
             val light = lookUpLightNear(event.position)
+            recordStop(event, light)
             if (light != null) {
                 trackingLightSet.add(light)
                 trackingLights = trackingLightSet.size
@@ -625,6 +677,21 @@ object GreenWaveController {
             coords[2 * i + 1] = light.position.longitude
         }
         Framework.nativeSetGreenWaveMarks(coords, BooleanArray(lights.size) { lights[it].position in learned })
+    }
+
+    /** Direction of travel on [path] at [position] (degrees, 0 = north), from 10 m before to 10 m after it. */
+    private fun approachBearing(path: List<LatLng>, position: LatLng): Double? {
+        if (path.size < 2) return null
+        val at = distanceAlongPath(path, position)
+        val a = pointAtDistanceAlongPath(path, maxOf(0.0, at - 10))
+        val b = pointAtDistanceAlongPath(path, at + 10)
+        if (a == b) return null
+        val lat1 = Math.toRadians(a.latitude)
+        val lat2 = Math.toRadians(b.latitude)
+        val dLon = Math.toRadians(b.longitude - a.longitude)
+        val y = Math.sin(dLon) * Math.cos(lat2)
+        val x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon)
+        return (Math.toDegrees(Math.atan2(y, x)) + 360) % 360
     }
 
     private fun needsQuery(path: List<LatLng>): Boolean {
