@@ -20,6 +20,8 @@ import dev.greenwave.shared.geo.LatLng
 import dev.greenwave.shared.geo.distanceAlongPath
 import dev.greenwave.shared.geo.distanceMeters
 import dev.greenwave.shared.geo.distanceToPath
+import dev.greenwave.shared.live.LaneConnectionMatcher
+import dev.greenwave.shared.live.LiveSignalCycle
 import dev.greenwave.shared.location.LocationUpdate
 import dev.greenwave.shared.model.Route
 import dev.greenwave.shared.model.TrafficLight
@@ -66,6 +68,8 @@ object GreenWaveController {
         val lightCount: Int,
         val learnedCount: Int,
         val advice: Advice?,
+        /** Of [learnedCount], lights whose timing comes from a live source (Hamburg). */
+        val liveCount: Int = 0,
     )
 
     /**
@@ -82,6 +86,11 @@ object GreenWaveController {
 
     @Volatile private var route: Route? = null
     @Volatile private var learnedCount = 0
+    @Volatile private var liveCount = 0
+    /** Worker-only: timing from a live source per light position, refreshed every [LIVE_REFRESH_MS]. */
+    private var liveLights: Map<LatLng, TrafficLight> = emptyMap()
+    private const val LIVE_REFRESH_MS = 5 * 60_000L
+    private const val LIVE_BATCH = 8
     /** Learned lights of [route] (main thread copy of [learnedPositions]). */
     @Volatile private var routeLearned: Set<LatLng> = emptySet()
     @Volatile var lightsStatus: LightsStatus = LightsStatus.NO_ROUTE
@@ -230,8 +239,10 @@ object GreenWaveController {
             lightsPath = path
             lightPositions = TrafficLightsAlongRoute.select(path, knownSignals.toList())
             knownLights?.addAll(lightPositions)
+            liveLights = emptyMap()
             publishRoute(revision)
             Log.i(TAG, "route rev $revision: ${lightPositions.size} traffic lights")
+            refreshLive(revision)
             LightsStatus.READY
         } catch (e: Exception) {
             Log.w(TAG, "traffic light lookup failed", e)
@@ -257,11 +268,46 @@ object GreenWaveController {
         }, delay)
     }
 
+    /**
+     * Worker: timing from Hamburg's live signal data for the route's lights in
+     * Hamburg, then again every [LIVE_REFRESH_MS] while the route is active.
+     * A failed request keeps the previous values.
+     */
+    private fun refreshLive(revision: Int) {
+        val positions = lightPositions.filter { HamburgSignalsClient.covers(it) }
+        if (positions.isEmpty()) return
+        val path = lightsPath
+        val now = System.currentTimeMillis() / 1000
+        val found = mutableMapOf<LatLng, TrafficLight>()
+        try {
+            for (batch in positions.chunked(LIVE_BATCH)) {
+                val connections = HamburgSignalsClient.laneConnections(batch, now)
+                for (position in batch) {
+                    val lane = LaneConnectionMatcher.match(path, position, connections) ?: continue
+                    LiveSignalCycle.estimate(position, lane.observations, now, lane.cycleStarts)?.let { found[position] = it }
+                }
+            }
+            liveLights = found
+            Log.i(TAG, "live timing for ${found.size} of ${positions.size} Hamburg lights")
+            publishRoute(revision)
+        } catch (e: Exception) {
+            Log.w(TAG, "Hamburg live signals failed", e)
+        }
+        main.postDelayed({
+            if (revision == requestedRevision) worker.execute { if (revision == requestedRevision) refreshLive(revision) }
+        }, LIVE_REFRESH_MS)
+    }
+
     /** Worker: combine current light positions with what has been learned so far. */
     private fun publishRoute(revision: Int) {
         val events = store?.all().orEmpty()
         val learnedSet = mutableSetOf<LatLng>()
+        val live = liveLights
         val lights = lightPositions.map { position ->
+            live[position]?.let {
+                learnedSet.add(position)
+                return@map it
+            }
             val stops = events.filter { StopEventMatcher.match(it.position, lightPositions) == position }
             val estimate = TrafficLightRhythmEstimator.estimate(stops)
             if (estimate != null && estimate.confidence >= MIN_CONFIDENCE) {
@@ -280,11 +326,13 @@ object GreenWaveController {
         learnedPositions = learnedSet
         val path = lightsPath
         val count = learnedSet.size
+        val liveNow = lightPositions.count { it in live }
         main.post {
             if (revision == requestedRevision) {
                 route = Route(path = path, trafficLights = lights)
                 routeLearned = learnedSet
                 learnedCount = count
+                liveCount = liveNow
                 showMarks(lights, learnedSet)
             }
         }
@@ -593,7 +641,7 @@ object GreenWaveController {
     fun state(location: Location?): State {
         val current = route ?: return State(LightsStatus.NO_ROUTE, 0, 0, null)
         if (location == null || lightsStatus != LightsStatus.READY) {
-            return State(lightsStatus, current.trafficLights.size, learnedCount, null)
+            return State(lightsStatus, current.trafficLights.size, learnedCount, null, liveCount)
         }
         val update = location.toUpdate()
         val progress = distanceAlongPath(current.path, update.position)
@@ -602,7 +650,7 @@ object GreenWaveController {
             .filter { it.second > 0 && it.second <= LOOKAHEAD_METERS }
             .sortedBy { it.second }
         val next = ahead.firstOrNull()
-            ?: return State(LightsStatus.READY, current.trafficLights.size, learnedCount, Advice(null, false, null))
+            ?: return State(LightsStatus.READY, current.trafficLights.size, learnedCount, Advice(null, false, null), liveCount)
         val known = next.first.position in routeLearned
         // Only learned lights take part; an unknown one further on must not steer the speed either.
         val learnedAhead = ahead.map { it.first }.takeWhile { it.position in routeLearned }
@@ -613,6 +661,6 @@ object GreenWaveController {
             currentSpeedKmh = update.speedKmh,
             speedRange = speedRange,
         )
-        return State(LightsStatus.READY, current.trafficLights.size, learnedCount, Advice(next.second, known, options))
+        return State(LightsStatus.READY, current.trafficLights.size, learnedCount, Advice(next.second, known, options), liveCount)
     }
 }

@@ -253,6 +253,10 @@ internal object GreenWaveDialogs {
             "Deine Fahrten werden dann markiert und später nicht für gemeinsame Ampeldaten verwendet, " +
                 "damit sie die Grünphasen nicht verfälschen.", small = true))
 
+        content.addView(text(context,
+            "Live-Ampeldaten Hamburg: Freie und Hansestadt Hamburg, Datenlizenz Deutschland " +
+                "Namensnennung 2.0 (tld.iot.hamburg.de). Ampelstandorte: © OpenStreetMap-Mitwirkende.", small = true))
+
         MaterialAlertDialogBuilder(context)
             .setTitle("greenWave")
             .setView(content)

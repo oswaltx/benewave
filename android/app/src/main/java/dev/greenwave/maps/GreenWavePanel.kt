@@ -105,7 +105,11 @@ class GreenWavePanel @JvmOverloads constructor(
     }
 
     private fun learnedSuffix(state: GreenWaveController.State): String =
-        if (state.learnedCount > 0) "\n${state.learnedCount}/${state.lightCount} gelernt" else ""
+        when {
+            state.learnedCount == 0 -> ""
+            state.liveCount > 0 -> "\n${state.learnedCount}/${state.lightCount} bekannt, ${state.liveCount} live"
+            else -> "\n${state.learnedCount}/${state.lightCount} gelernt"
+        }
 
     private fun formatDistance(meters: Double): String =
         if (meters < 1000) "${(meters / 10).roundToInt() * 10} m" else "%.1f km".format(meters / 1000)
