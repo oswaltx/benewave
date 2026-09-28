@@ -17,6 +17,7 @@ internal class TrackFile(context: Context, startEpochSec: Long) {
     val file: File = File(dir(context), "track-$startEpochSec.csv")
     private val writer: Writer = file.bufferedWriter().apply { write(HEADER) }
     private var pending = 0
+    private var points = 0
     private val routesFile = File(file.path.removeSuffix(".csv") + "-routes.json")
     private val routes = JSONArray()
 
@@ -39,6 +40,7 @@ internal class TrackFile(context: Context, startEpochSec: Long) {
                 if (location.hasAltitude()) "%.0f".format(Locale.ROOT, location.altitude) else "",
             ),
         )
+        points++
         // Flush every ~30 fixes so a killed process loses at most half a minute.
         if (++pending >= 30) {
             writer.flush()
@@ -46,18 +48,23 @@ internal class TrackFile(context: Context, startEpochSec: Long) {
         }
     }
 
-    fun close() = runCatching { writer.close() }
+    /** Closes the track; a track without a single fix is deleted instead of showing up empty. */
+    fun close() {
+        runCatching { writer.close() }
+        if (points == 0 && routes.length() == 0) file.delete()
+    }
 
     companion object {
         private const val HEADER = "epoch_s,lat,lon,speed_kmh,bearing_deg,accuracy_m,altitude_m\n"
 
         fun dir(context: Context) = File(context.applicationContext.filesDir, "greenwave_tracks").apply { mkdirs() }
 
-        /** Tracks (CSV) and the routes suggested during them (JSON), newest first. */
+        /** Tracks (CSV) and the routes suggested during them (JSON), newest first; header-only tracks are skipped. */
         fun all(context: Context): List<File> =
-            dir(context).listFiles { f -> f.name.endsWith(".csv") || f.name.endsWith(".json") }
+            dir(context).listFiles { f -> (f.name.endsWith(".csv") && f.length() > HEADER.length) || f.name.endsWith(".json") }
                 .orEmpty().sortedByDescending { it.name }
 
-        fun count(context: Context): Int = dir(context).listFiles { f -> f.name.endsWith(".csv") }?.size ?: 0
+        fun count(context: Context): Int =
+            dir(context).listFiles { f -> f.name.endsWith(".csv") && f.length() > HEADER.length }?.size ?: 0
     }
 }
