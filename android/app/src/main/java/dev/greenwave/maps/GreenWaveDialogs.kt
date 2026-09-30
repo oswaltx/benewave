@@ -83,6 +83,7 @@ internal object GreenWaveDialogs {
             "Einstellungen" to { showSettings(activity) },
         )
         if (tracks.isNotEmpty()) items.add("Aufzeichnungen teilen (${TrackFile.count(activity)})" to { shareTracks(activity, tracks) })
+        items.add("Daten exportieren" to { exportData(activity) })
         MaterialAlertDialogBuilder(activity)
             .setTitle("greenWave")
             .setItems(items.map { it.first }.toTypedArray()) { _, which -> items[which].second() }
@@ -110,6 +111,48 @@ internal object GreenWaveDialogs {
             .putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         activity.startActivity(Intent.createChooser(intent, "Aufzeichnungen teilen"))
+    }
+
+    /**
+     * Everything greenWave has stored (tracks, stops, light events, known lights,
+     * rides) as one ZIP in the app's folder on shared storage
+     * (Android/data/<app>/files/export), then offered via the share sheet.
+     * The raw material for checking how well the lights are learned.
+     */
+    private fun exportData(activity: Activity) {
+        val app = activity.applicationContext
+        Thread {
+            val result = runCatching {
+                val sources = app.filesDir.listFiles { f -> f.name.startsWith("greenwave") && !f.name.endsWith(".tmp") }
+                    .orEmpty()
+                val dir = File(app.getExternalFilesDir(null), "export").apply { mkdirs() }
+                val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", Locale.ROOT).format(java.util.Date())
+                val zip = File(dir, "greenwave-export-$stamp.zip")
+                java.util.zip.ZipOutputStream(zip.outputStream().buffered()).use { out ->
+                    for (source in sources) {
+                        source.walkTopDown().filter { it.isFile && !it.name.endsWith(".tmp") }.forEach { f ->
+                            out.putNextEntry(java.util.zip.ZipEntry(f.relativeTo(app.filesDir).path))
+                            f.inputStream().use { it.copyTo(out) }
+                            out.closeEntry()
+                        }
+                    }
+                }
+                zip
+            }
+            activity.runOnUiThread {
+                result.onSuccess { zip ->
+                    Toast.makeText(activity, "Exportiert: ${zip.name}", Toast.LENGTH_LONG).show()
+                    val uri = FileProvider.getUriForFile(activity, BuildConfig.FILE_PROVIDER_AUTHORITY, zip)
+                    val intent = Intent(Intent.ACTION_SEND)
+                        .setType("application/zip")
+                        .putExtra(Intent.EXTRA_STREAM, uri)
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    activity.startActivity(Intent.createChooser(intent, "greenWave-Daten teilen"))
+                }.onFailure {
+                    Toast.makeText(activity, "Export fehlgeschlagen: ${it.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
     }
 
     /** All recorded rides (tracking mode and bicycle navigations), newest first. */

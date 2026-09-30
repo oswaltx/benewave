@@ -19,6 +19,7 @@ import dev.greenwave.shared.algorithm.SpeedRangeKmh
 import dev.greenwave.shared.data.RandomTrafficTimingGenerator
 import dev.greenwave.shared.geo.LatLng
 import dev.greenwave.shared.geo.distanceAlongPath
+import dev.greenwave.shared.geo.bearingDegrees
 import dev.greenwave.shared.geo.distanceMeters
 import dev.greenwave.shared.geo.pointAtDistanceAlongPath
 import dev.greenwave.shared.geo.distanceToPath
@@ -29,6 +30,9 @@ import dev.greenwave.shared.model.Route
 import dev.greenwave.shared.model.TrafficLight
 import dev.greenwave.shared.routing.TrafficLightsAlongRoute
 import dev.greenwave.shared.tracking.LightEvent
+import dev.greenwave.shared.tracking.EdgeTrim
+import dev.greenwave.shared.tracking.MovementResolver
+import dev.greenwave.shared.tracking.RideGuard
 import dev.greenwave.shared.tracking.ObservationCycleEstimator
 import dev.greenwave.shared.tracking.PassDetector
 import dev.greenwave.shared.tracking.RhythmEstimate
@@ -58,6 +62,9 @@ object GreenWaveController {
 
     /** Only lights this far ahead count for the advice; farther ones are too uncertain. */
     private const val LOOKAHEAD_METERS = 2_000.0
+
+    /** Approach and exit of a light are measured this far before and after it (as in MovementResolver). */
+    private const val MOVEMENT_METERS = 40.0
 
     /** Re-query Overpass only if this share of a new route leaves the area already covered. */
     private const val UNCOVERED_SHARE_FOR_REQUERY = 0.15
@@ -113,10 +120,20 @@ object GreenWaveController {
     // Worker-only state for learning.
     private var store: StopEventStore? = null
     private var lightEvents: LightEventStore? = null
-    private val stopDetector = StopDetector()
-    private val passDetector = PassDetector()
-    /** Recent (epochSec, bearing) of moving fixes, for the approach direction of a stop. */
-    private val recentBearings = ArrayDeque<Pair<Long, Float>>()
+    private var stopDetector = StopDetector()
+    private var passDetector = PassDetector()
+    /** Worker-only, per ride: is this still a bicycle ride worth learning from (see [RideGuard]). */
+    private var guard = RideGuard()
+    /** Worker-only, per ride: no learning near the ride's start and end (see [EdgeTrim]). */
+    private var edges = EdgeTrim()
+    private var learning = true
+    private var lastPosition: LatLng? = null
+
+    /** For the tracking card and notification: why learning is paused, null while riding. */
+    @Volatile var rideState: RideGuard.State = RideGuard.State.RIDING
+        private set
+    /** Worker-only: holds stops and passes back until the rider's turn at the light is known. */
+    private val movements = MovementResolver()
     private var lightPositions: List<LatLng> = emptyList()
     private var lightsPath: List<LatLng> = emptyList()
     private var lights: List<TrafficLight> = emptyList()
@@ -385,7 +402,8 @@ object GreenWaveController {
                 learnedSet.add(position)
                 return@map it
             }
-            val estimate = learnedProgram(position, approachBearing(path, position), now)
+            val (approach, turn) = routeMovement(path, position)
+            val estimate = learnedProgram(position, approach, now, turn)
             if (estimate != null && estimate.confidence >= MIN_CONFIDENCE) {
                 learnedSet.add(position)
                 TrafficLight(
@@ -427,6 +445,7 @@ object GreenWaveController {
         worker.execute {
             if (track == null) openNavTrack(update.epochSec)
             if (trackByNav) track?.append(fix)
+            if (!shouldLearn(update)) return@execute
             trackRide(update)
             observeLights(update)
             val event = stopDetector.onUpdate(update) ?: return@execute
@@ -446,6 +465,7 @@ object GreenWaveController {
 
     /** Worker: navigation without tracking mode also records its track, next to the suggested route. */
     private fun openNavTrack(epochSec: Long) {
+        startRideEvents()
         val context = appContext ?: return
         track = TrackFile(context, epochSec).also { t -> suggestedRoute?.let { t.addRoute(it) } }
         trackByNav = true
@@ -456,25 +476,22 @@ object GreenWaveController {
     @Volatile private var navEvent: Pair<String, Long>? = null
     private const val NAV_EVENT_SHOW_MS = 20_000L
 
-    /** Worker: remember the heading of moving fixes and log pass-throughs at nearby lights. */
+    /** Worker: pass-throughs at nearby lights, and events whose turn has become known. */
     private fun observeLights(update: LocationUpdate) {
-        val bearing = update.bearingDegrees
-        if (bearing != null && update.speedKmh >= RideLog.MOVING_KMH) {
-            recentBearings.addLast(update.epochSec to bearing)
-            while (recentBearings.size > 180) recentBearings.removeFirst()
-        }
         val candidates = (lightPositions + areaLights + knownLights?.all().orEmpty())
             .filter { distanceMeters(it, update.position) < 100.0 }
             .distinct()
         val passes = passDetector.onUpdate(update, candidates)
+        passes.forEach(movements::addPass)
+        storeResolved(edges.onUpdate(update.position, movements.onUpdate(update)))
         if (passes.isNotEmpty()) {
-            lightEvents?.addAll(passes)
             Log.i(TAG, "passed on green: ${passes.size}")
             if (GreenWaveTrackingService.running && route == null) {
                 trackingPasses += passes.size
                 passes.forEach { trackingLightSet.add(it.light) }
                 trackingLights = trackingLightSet.size
-                val there = lightEvents?.at(passes.last().light).orEmpty().size
+                // The pass itself is still pending in [movements], hence + 1.
+                val there = lightEvents?.at(passes.last().light).orEmpty().size + 1
                 trackingLastEvent = "Grün-Durchfahrt registriert · $there Daten dort"
                 trackingLastEventAt = System.currentTimeMillis()
                 refreshAreaMarks()
@@ -483,16 +500,70 @@ object GreenWaveController {
         }
     }
 
-    /** Worker: a stop at [light] as learning events, with the direction the rider came from. */
+    /**
+     * Worker: a stop at [light] as learning events. They are stored once the rider
+     * has left the light and the turn is known (see [MovementResolver]).
+     */
     private fun recordStop(event: StopEvent, light: LatLng?) {
         if (light == null) return
-        val heading = recentBearings.lastOrNull { it.first <= event.startEpochSec }?.second?.roundToInt()
-        lightEvents?.addAll(LightEvent.fromStop(event, light, heading))
+        movements.addStop(event, light)
     }
 
-    /** Worker: the learned program for [position] when approached with [headingDeg], or null. */
-    private fun learnedProgram(position: LatLng, headingDeg: Double?, nowEpochSec: Long): RhythmEstimate? {
-        val events = lightEvents?.at(position).orEmpty().filter { it.sameApproach(headingDeg) }
+    /** Worker: a new recording starts; nothing carries over from the last one. */
+    private fun startRideEvents() {
+        guard = RideGuard()
+        edges = EdgeTrim()
+        stopDetector = StopDetector()
+        passDetector = PassDetector()
+        learning = true
+        rideState = RideGuard.State.RIDING
+        lastPosition = null
+    }
+
+    /** Worker: the recording ended; store what is resolved, drop what lies near the end point. */
+    private fun endRideEvents() {
+        val flushed = movements.flush()
+        lastPosition?.let { storeResolved(edges.onUpdate(it, flushed)) }
+        val dropped = edges.end()
+        if (dropped > 0) Log.i(TAG, "dropped $dropped light events near the end of the ride")
+    }
+
+    /**
+     * Worker: whether [update] belongs to a bicycle ride worth learning from. When
+     * learning pauses (tram, car, long standstill, no fix), the stop and pass
+     * detectors start afresh, so no stop spans the pause.
+     */
+    private fun shouldLearn(update: LocationUpdate): Boolean {
+        lastPosition = update.position
+        val decision = guard.onFix(update)
+        if (decision.state != rideState) Log.i(TAG, "ride state ${rideState} -> ${decision.state}")
+        rideState = decision.state
+        if (!decision.learn && learning) {
+            stopDetector = StopDetector()
+            passDetector = PassDetector()
+        }
+        learning = decision.learn
+        return decision.learn
+    }
+
+    /** Worker: events whose approach and turn are resolved, into the learning log. */
+    private fun storeResolved(events: List<LightEvent>) {
+        if (events.isEmpty()) return
+        lightEvents?.addAll(events)
+        Log.i(TAG, "light events stored: " + events.joinToString { "${it.kind} ${it.headingDeg}->${it.exitHeadingDeg} ${it.turn}" })
+    }
+
+    /**
+     * Worker: the learned program for [position] when approached with [headingDeg]
+     * and left with [turn] (null = any), or null.
+     */
+    private fun learnedProgram(
+        position: LatLng,
+        headingDeg: Double?,
+        nowEpochSec: Long,
+        turn: LightEvent.Turn? = null,
+    ): RhythmEstimate? {
+        val events = lightEvents?.at(position).orEmpty().filter { it.sameMovement(headingDeg, turn) }
         // Stops logged before light events existed count too (direction unknown).
         val since = lightEvents?.all()?.firstOrNull()?.epochSec ?: Long.MAX_VALUE
         val legacy = store?.all().orEmpty()
@@ -540,6 +611,7 @@ object GreenWaveController {
 
     /** Worker: navigation ended — log the ride and ask for a rating. */
     private fun finishRide(askRating: Boolean = true) {
+        endRideEvents()
         if (trackByNav) {
             track?.close()
             track = null
@@ -614,6 +686,7 @@ object GreenWaveController {
             track?.close()
             trackingLightSet.clear()
             trackByNav = false
+            startRideEvents()
             track = TrackFile(appContext, System.currentTimeMillis() / 1000)
                 .also { t -> if (route != null) suggestedRoute?.let { t.addRoute(it) } }
             Log.i(TAG, "tracking started: ${track?.file?.name}")
@@ -631,6 +704,7 @@ object GreenWaveController {
             track?.append(location)
             if (navigating) return@execute
             updateArea(update.position)
+            if (!shouldLearn(update)) return@execute
             trackRide(update)
             observeLights(update)
             val event = stopDetector.onUpdate(update) ?: return@execute
@@ -655,6 +729,7 @@ object GreenWaveController {
     /** Tracking mode ended: close the track, log the ride (no rating, there was no advice). */
     fun stopTracking() {
         worker.execute {
+            endRideEvents()
             track?.close()
             Log.i(TAG, "tracking stopped: ${track?.file?.name}")
             track = null
@@ -871,18 +946,20 @@ object GreenWaveController {
     }
 
     /** Direction of travel on [path] at [position] (degrees, 0 = north), from 10 m before to 10 m after it. */
-    private fun approachBearing(path: List<LatLng>, position: LatLng): Double? {
-        if (path.size < 2) return null
+    /**
+     * How the route goes through the light at [position]: approach bearing (from
+     * 40 m before to the light) and the turn (to 40 m after it), as the rider's
+     * events are recorded (see [MovementResolver]). Nulls where the route is too short.
+     */
+    private fun routeMovement(path: List<LatLng>, position: LatLng): Pair<Double?, LightEvent.Turn?> {
+        if (path.size < 2) return null to null
         val at = distanceAlongPath(path, position)
-        val a = pointAtDistanceAlongPath(path, maxOf(0.0, at - 10))
-        val b = pointAtDistanceAlongPath(path, at + 10)
-        if (a == b) return null
-        val lat1 = Math.toRadians(a.latitude)
-        val lat2 = Math.toRadians(b.latitude)
-        val dLon = Math.toRadians(b.longitude - a.longitude)
-        val y = Math.sin(dLon) * Math.cos(lat2)
-        val x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(dLon)
-        return (Math.toDegrees(Math.atan2(y, x)) + 360) % 360
+        val before = pointAtDistanceAlongPath(path, maxOf(0.0, at - MOVEMENT_METERS))
+        val after = pointAtDistanceAlongPath(path, at + MOVEMENT_METERS)
+        val approach = if (distanceMeters(before, position) < 5.0) null else bearingDegrees(before, position)
+        val exit = if (distanceMeters(position, after) < 5.0) null else bearingDegrees(position, after)
+        val turn = if (approach == null || exit == null) null else LightEvent.turnOf(approach, exit)
+        return approach to turn
     }
 
     private fun needsQuery(path: List<LatLng>): Boolean {

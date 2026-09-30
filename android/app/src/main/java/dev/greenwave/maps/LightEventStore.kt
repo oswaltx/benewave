@@ -10,7 +10,8 @@ import java.io.File
 /**
  * On-device log of [LightEvent]s (stop start/end and pass-throughs per light and
  * direction), the input for learning each light's program. One compact JSON
- * array of rows `[lat, lon, epochSec, kind, heading|null]`. Capped at
+ * array of rows `[lat, lon, epochSec, kind, heading|null, exitHeading|null]`
+ * (older files have no exit column). Capped at
  * [MAX_EVENTS], oldest dropped first. Worker-only.
  */
 internal class LightEventStore(context: Context) {
@@ -44,6 +45,7 @@ internal class LightEventStore(context: Context) {
                             epochSec = r.getLong(2),
                             kind = LightEvent.Kind.valueOf(r.getString(3)),
                             headingDeg = if (r.isNull(4)) null else r.getInt(4),
+                            exitHeadingDeg = if (r.length() < 6 || r.isNull(5)) null else r.getInt(5),
                         ),
                     )
                 }
@@ -60,7 +62,8 @@ internal class LightEventStore(context: Context) {
         events.forEach { e ->
             rows.put(
                 JSONArray().put(e.light.latitude).put(e.light.longitude).put(e.epochSec).put(e.kind.name)
-                    .put(e.headingDeg ?: org.json.JSONObject.NULL),
+                    .put(e.headingDeg ?: org.json.JSONObject.NULL)
+                    .put(e.exitHeadingDeg ?: org.json.JSONObject.NULL),
             )
         }
         val tmp = File(file.path + ".tmp")
