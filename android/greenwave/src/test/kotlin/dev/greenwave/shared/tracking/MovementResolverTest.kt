@@ -121,4 +121,14 @@ class MovementResolverTest {
         assertTrue(!left.sameMovement(0.0, LightEvent.Turn.STRAIGHT))
         assertTrue(left.sameMovement(0.0, null))
     }
+
+    @Test
+    fun cyclewayAndCarriagewayObservationsAreKeptApart() {
+        val onWay = LightEvent(light, 0, LightEvent.Kind.PASS_GREEN, 0, sideway = false)
+        val alongside = onWay.copy(sideway = true)
+        val old = onWay.copy(sideway = null)
+        assertTrue(onWay.sameSide(false) && !onWay.sameSide(true))
+        assertTrue(alongside.sameSide(true) && !alongside.sameSide(false))
+        assertTrue(old.sameSide(true) && old.sameSide(false) && onWay.sameSide(null))
+    }
 }

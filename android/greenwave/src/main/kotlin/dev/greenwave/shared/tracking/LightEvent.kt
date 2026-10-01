@@ -41,6 +41,14 @@ data class LightEvent(
     fun sameMovement(approachDeg: Double?, turn: Turn?, toleranceDeg: Double = 45.0): Boolean =
         sameApproach(approachDeg, toleranceDeg) && (turn == null || this.turn == null || this.turn == turn)
 
+    /**
+     * Seen from the same kind of way as [sideway] (on the signal's way, or on a
+     * cycleway alongside it). Kept apart because a carriageway signal often does
+     * not govern the cycleway next to it (e.g. Cologne's Rhine embankment, where
+     * riders pass freely except at side streets). Unknown on either side matches.
+     */
+    fun sameSide(sideway: Boolean?): Boolean = sideway == null || this.sideway == null || this.sideway == sideway
+
     enum class Kind {
         /** Stopped here: red from this moment on. */
         STOP_START,

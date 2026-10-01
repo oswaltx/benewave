@@ -74,6 +74,8 @@ object GreenWaveController {
     private const val ON_ROUTE_METERS = 4.0
     /** A signal node this close to a way's geometry is taken to be a node of that way. */
     private const val SIGNAL_ON_WAY_METERS = 2.5
+    /** A planned route closer than this to a signal runs over it, farther away alongside it. */
+    private const val ROUTE_PASSES_SIGNAL_METERS = 5.0
     private const val REASSIGN_METERS = 40.0
 
     /** Re-query Overpass only if this share of a new route leaves the area already covered. */
@@ -415,7 +417,9 @@ object GreenWaveController {
                 return@map it
             }
             val (approach, turn) = routeMovement(path, position)
-            val estimate = learnedProgram(position, approach, now, turn)
+            // A route that passes the signal at a distance runs on a way alongside it.
+            val sideway = distanceToPath(path, position) > ROUTE_PASSES_SIGNAL_METERS
+            val estimate = learnedProgram(position, approach, now, turn, sideway)
             if (estimate != null && estimate.confidence >= MIN_CONFIDENCE) {
                 learnedSet.add(position)
                 TrafficLight(
@@ -650,16 +654,18 @@ object GreenWaveController {
     }
 
     /**
-     * Worker: the learned program for [position] when approached with [headingDeg]
-     * and left with [turn] (null = any), or null.
+     * Worker: the learned program for [position] when approached with [headingDeg],
+     * left with [turn] and seen from the signal's own way or from one alongside
+     * ([sideway]); null arguments match any. Null if not learned.
      */
     private fun learnedProgram(
         position: LatLng,
         headingDeg: Double?,
         nowEpochSec: Long,
         turn: LightEvent.Turn? = null,
+        sideway: Boolean? = null,
     ): RhythmEstimate? {
-        val events = lightEvents?.at(position).orEmpty().filter { it.sameMovement(headingDeg, turn) }
+        val events = lightEvents?.at(position).orEmpty().filter { it.sameMovement(headingDeg, turn) && it.sameSide(sideway) }
         // Stops logged before light events existed count too (direction unknown).
         val since = lightEvents?.all()?.firstOrNull()?.epochSec ?: Long.MAX_VALUE
         val legacy = store?.all().orEmpty()
