@@ -1,0 +1,1 @@
+Source: https://github.com/bmwcarit/hmm-lib commit 18f483637138a273406ea397c79ede4999803855 (2021-08-24 14:04:19 +0200), files under src/main/java/com/bmw/hmm copied unmodified.

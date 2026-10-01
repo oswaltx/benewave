@@ -36,7 +36,13 @@ internal class GreenWaveSettings(context: Context) {
         get() = prefs.getBoolean(KEY_RUNS_RED, false)
         set(value) = prefs.edit().putBoolean(KEY_RUNS_RED, value).apply()
 
+    /** Development: after every ride, write the full export to Documents/greenWave (see DataExport). */
+    var autoExport: Boolean
+        get() = prefs.getBoolean(KEY_AUTO_EXPORT, false)
+        set(value) = prefs.edit().putBoolean(KEY_AUTO_EXPORT, value).apply()
+
     private companion object {
+        const val KEY_AUTO_EXPORT = "auto_export"
         const val KEY_MIN = "range_min_kmh"
         const val KEY_MAX = "range_max_kmh"
         const val KEY_AUTO = "auto_profile"

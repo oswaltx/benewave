@@ -3,6 +3,8 @@ package dev.greenwave.maps
 import app.organicmaps.sdk.Framework
 import dev.greenwave.shared.geo.LatLng
 import dev.greenwave.shared.geo.distanceMeters
+import dev.greenwave.shared.matching.Way
+import dev.greenwave.shared.matching.WayKind
 import kotlin.math.cos
 
 /**
@@ -48,4 +50,37 @@ internal object OfflineSignals {
     }
 
     private const val METERS_PER_DEGREE = 111_320.0
+}
+
+/**
+ * Bicycle-usable ways from the downloaded maps, for map matching the rider's
+ * track (see [dev.greenwave.shared.matching.MapMatcher]). Empty where no map is
+ * downloaded. Blocking, fine on the worker for a few hundred metres.
+ */
+internal object OfflineWays {
+    fun around(points: List<LatLng>, marginMeters: Double): List<Way> {
+        if (points.isEmpty()) return emptyList()
+        val midLat = points.sumOf { it.latitude } / points.size
+        val dLat = marginMeters / 111_320.0
+        val dLon = marginMeters / (111_320.0 * cos(Math.toRadians(midLat)))
+        val raw = Framework.nativeGreenWaveWays(
+            points.minOf { it.latitude } - dLat,
+            points.minOf { it.longitude } - dLon,
+            points.maxOf { it.latitude } + dLat,
+            points.maxOf { it.longitude } + dLon,
+        )
+        val ways = mutableListOf<Way>()
+        var i = 1
+        repeat(raw.firstOrNull()?.toInt() ?: 0) {
+            val kind = KINDS.getOrElse(raw[i].toInt()) { WayKind.OTHER }
+            val id = raw[i + 1].toLong()
+            val n = raw[i + 2].toInt()
+            i += 3
+            ways.add(Way(id, List(n) { k -> LatLng(latitude = raw[i + 2 * k], longitude = raw[i + 2 * k + 1]) }, kind))
+            i += 2 * n
+        }
+        return ways
+    }
+
+    private val KINDS = listOf(WayKind.CARRIAGEWAY, WayKind.CYCLEWAY, WayKind.FOOTWAY, WayKind.PATH, WayKind.OTHER)
 }

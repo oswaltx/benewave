@@ -30,6 +30,8 @@ import dev.greenwave.shared.model.Route
 import dev.greenwave.shared.model.TrafficLight
 import dev.greenwave.shared.routing.TrafficLightsAlongRoute
 import dev.greenwave.shared.tracking.LightEvent
+import dev.greenwave.shared.matching.MapMatcher
+import dev.greenwave.shared.matching.RoadNetwork
 import dev.greenwave.shared.tracking.EdgeTrim
 import dev.greenwave.shared.tracking.MovementResolver
 import dev.greenwave.shared.tracking.RideGuard
@@ -65,6 +67,14 @@ object GreenWaveController {
 
     /** Approach and exit of a light are measured this far before and after it (as in MovementResolver). */
     private const val MOVEMENT_METERS = 40.0
+
+    /** Map matching: fixes kept, fixes used around a light, and how close a light must be to the ridden way. */
+    private const val RECENT_FIXES_SEC = 600L
+    private const val MATCH_RADIUS_METERS = 250.0
+    private const val ON_ROUTE_METERS = 4.0
+    /** A signal node this close to a way's geometry is taken to be a node of that way. */
+    private const val SIGNAL_ON_WAY_METERS = 2.5
+    private const val REASSIGN_METERS = 40.0
 
     /** Re-query Overpass only if this share of a new route leaves the area already covered. */
     private const val UNCOVERED_SHARE_FOR_REQUERY = 0.15
@@ -128,6 +138,8 @@ object GreenWaveController {
     private var edges = EdgeTrim()
     private var learning = true
     private var lastPosition: LatLng? = null
+    /** Worker-only: the last minutes of fixes, for map matching around a light (see [matchEvents]). */
+    private val recentFixes = ArrayDeque<LocationUpdate>()
 
     /** For the tracking card and notification: why learning is paused, null while riding. */
     @Volatile var rideState: RideGuard.State = RideGuard.State.RIDING
@@ -483,7 +495,7 @@ object GreenWaveController {
             .distinct()
         val passes = passDetector.onUpdate(update, candidates)
         passes.forEach(movements::addPass)
-        storeResolved(edges.onUpdate(update.position, movements.onUpdate(update)))
+        storeResolved(edges.onUpdate(update.position, matchEvents(movements.onUpdate(update))))
         if (passes.isNotEmpty()) {
             Log.i(TAG, "passed on green: ${passes.size}")
             if (GreenWaveTrackingService.running && route == null) {
@@ -522,10 +534,12 @@ object GreenWaveController {
 
     /** Worker: the recording ended; store what is resolved, drop what lies near the end point. */
     private fun endRideEvents() {
-        val flushed = movements.flush()
+        val flushed = matchEvents(movements.flush())
         lastPosition?.let { storeResolved(edges.onUpdate(it, flushed)) }
         val dropped = edges.end()
         if (dropped > 0) Log.i(TAG, "dropped $dropped light events near the end of the ride")
+        val context = appContext
+        if (context != null && settings?.autoExport == true) DataExport.toDocuments(context)
     }
 
     /**
@@ -535,6 +549,10 @@ object GreenWaveController {
      */
     private fun shouldLearn(update: LocationUpdate): Boolean {
         lastPosition = update.position
+        recentFixes.addLast(update)
+        while (recentFixes.isNotEmpty() && update.epochSec - recentFixes.first().epochSec > RECENT_FIXES_SEC) {
+            recentFixes.removeFirst()
+        }
         val decision = guard.onFix(update)
         if (decision.state != rideState) Log.i(TAG, "ride state ${rideState} -> ${decision.state}")
         rideState = decision.state
@@ -544,6 +562,84 @@ object GreenWaveController {
         }
         learning = decision.learn
         return decision.learn
+    }
+
+    /**
+     * Worker: checks resolved events against the way actually ridden, by map
+     * matching the fixes around each light onto the downloaded map's ways
+     * (MapMatcher, Newson & Krumm). A light that is not on the ridden way (e.g.
+     * the carriageway signal next to a separate cycleway) is replaced by a known
+     * light within [REASSIGN_METERS] that is, or the events are dropped. Approach
+     * and turn come from the matched route, so a curve of the road is straight on.
+     * Without map data or a match the events stay as they are.
+     */
+    private fun matchEvents(events: List<LightEvent>): List<LightEvent> {
+        if (events.isEmpty()) return events
+        val out = mutableListOf<LightEvent>()
+        for ((light, group) in events.groupBy { it.light }) {
+            val t0 = group.minOf { it.epochSec }
+            val window = recentFixes
+                .filter { it.epochSec in (t0 - 240)..(t0 + 180) && distanceMeters(it.position, light) <= MATCH_RADIUS_METERS }
+                .map { it.position }
+            var network: RoadNetwork? = null
+            val match = if (window.size < 5) null else try {
+                val ways = OfflineWays.around(window, 60.0)
+                if (ways.isEmpty()) null else RoadNetwork(ways).let { network = it; MapMatcher(it).match(window) }
+            } catch (e: Throwable) {
+                Log.w(TAG, "map matching failed", e)
+                null
+            }
+            val net = network
+            if (match == null || net == null) {
+                out.addAll(group)
+                continue
+            }
+            val routeWays = match.edges.mapTo(HashSet()) { it.way.id }
+            // A signal is a node of one way: it governs the rider if the route uses that way.
+            fun onRoute(p: LatLng): Boolean {
+                val under = net.edges.map { net.project(p, it) }.minByOrNull { it.distanceMeters }
+                return if (under != null && under.distanceMeters <= SIGNAL_ON_WAY_METERS) {
+                    under.edge.way.id in routeWays
+                } else {
+                    match.distanceTo(p) <= ON_ROUTE_METERS
+                }
+            }
+            // Prefer a light of this junction on the ridden way; otherwise keep the light
+            // and mark the events as seen from a way alongside (see LightEvent.sideway).
+            val onWay = if (onRoute(light)) light else {
+                (lightPositions + areaLights + knownLights?.all().orEmpty())
+                    .distinct()
+                    .filter { it != light && distanceMeters(it, light) <= REASSIGN_METERS && onRoute(it) }
+                    .minByOrNull { distanceMeters(it, light) }
+            }
+            val target = onWay ?: light
+            val sideway = onWay == null
+            if (sideway) {
+                Log.i(
+                    TAG,
+                    "map matching: light %.5f,%.5f seen from a way alongside (route %.1f m away, route ways %s)"
+                        .format(
+                            java.util.Locale.ROOT, light.latitude, light.longitude,
+                            match.distanceTo(light), match.edges.map { it.way.kind }.distinct(),
+                        ),
+                )
+            }
+            // Measured along the ridden route, also when the light is on the carriageway alongside.
+            val passage = match.passage(target, toleranceMeters = 30.0)
+            if (target != light) Log.i(TAG, "map matching: ${light} -> ${target} (on the ridden way)")
+            out.addAll(
+                group.map { e ->
+                    val inBearing = passage?.inBearing?.roundToInt()
+                    val exit = when {
+                        passage == null -> e.exitHeadingDeg
+                        passage.sameWay -> inBearing ?: e.exitHeadingDeg
+                        else -> passage.outBearing?.roundToInt() ?: e.exitHeadingDeg
+                    }
+                    e.copy(light = target, headingDeg = inBearing ?: e.headingDeg, exitHeadingDeg = exit, sideway = sideway)
+                },
+            )
+        }
+        return out
     }
 
     /** Worker: events whose approach and turn are resolved, into the learning log. */

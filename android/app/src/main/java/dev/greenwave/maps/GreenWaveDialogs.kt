@@ -123,20 +123,10 @@ internal object GreenWaveDialogs {
         val app = activity.applicationContext
         Thread {
             val result = runCatching {
-                val sources = app.filesDir.listFiles { f -> f.name.startsWith("greenwave") && !f.name.endsWith(".tmp") }
-                    .orEmpty()
                 val dir = File(app.getExternalFilesDir(null), "export").apply { mkdirs() }
                 val stamp = java.text.SimpleDateFormat("yyyyMMdd-HHmmss", Locale.ROOT).format(java.util.Date())
                 val zip = File(dir, "greenwave-export-$stamp.zip")
-                java.util.zip.ZipOutputStream(zip.outputStream().buffered()).use { out ->
-                    for (source in sources) {
-                        source.walkTopDown().filter { it.isFile && !it.name.endsWith(".tmp") }.forEach { f ->
-                            out.putNextEntry(java.util.zip.ZipEntry(f.relativeTo(app.filesDir).path))
-                            f.inputStream().use { it.copyTo(out) }
-                            out.closeEntry()
-                        }
-                    }
-                }
+                zip.outputStream().use { DataExport.writeZip(app, it) }
                 zip
             }
             activity.runOnUiThread {
@@ -296,6 +286,15 @@ internal object GreenWaveDialogs {
             "Deine Fahrten werden dann markiert und später nicht für gemeinsame Ampeldaten verwendet, " +
                 "damit sie die Grünphasen nicht verfälschen.", small = true))
 
+        val autoExport = SwitchCompat(context).apply {
+            text = "Nach jeder Fahrt exportieren (Entwicklung)"
+            isChecked = settings.autoExport
+        }
+        content.addView(autoExport)
+        content.addView(text(context,
+            "Legt alle greenWave-Daten nach jeder Fahrt als Documents/greenWave/greenwave-latest.zip ab, " +
+                "z. B. für den Abgleich per Syncthing. Die Datei wird jedes Mal ersetzt.", small = true))
+
         content.addView(text(context,
             "Live-Ampeldaten Hamburg: Freie und Hansestadt Hamburg, Datenlizenz Deutschland " +
                 "Namensnennung 2.0 (tld.iot.hamburg.de). Ampelstandorte: © OpenStreetMap-Mitwirkende.", small = true))
@@ -312,6 +311,7 @@ internal object GreenWaveDialogs {
                 settings.loggingEnabled = logging.isChecked
                 settings.autoProfile = auto.isChecked
                 settings.runsRed = red.isChecked
+                settings.autoExport = autoExport.isChecked
             }
             .setNegativeButton("Abbrechen", null)
             .show()

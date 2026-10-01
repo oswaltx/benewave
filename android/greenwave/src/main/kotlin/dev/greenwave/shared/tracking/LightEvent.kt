@@ -17,6 +17,14 @@ data class LightEvent(
     val headingDeg: Int?,
     /** Direction the rider left the junction in, null if unknown (older logs, ride ended at the light). */
     val exitHeadingDeg: Int? = null,
+    /**
+     * From map matching: true if the rider was on a separate way (cycleway,
+     * footway) alongside the way the signal is on, false if on that way itself,
+     * null if unknown. Whether a carriageway signal governs the parallel
+     * cycleway depends on the junction (in Germany it does unless there is a
+     * bicycle signal), so such events are kept and marked rather than dropped.
+     */
+    val sideway: Boolean? = null,
 ) {
     /** What the rider did at the junction; different turns often have their own green phase. */
     enum class Turn { STRAIGHT, LEFT, RIGHT, U_TURN }
