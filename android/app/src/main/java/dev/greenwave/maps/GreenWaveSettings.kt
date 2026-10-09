@@ -64,6 +64,20 @@ internal class GreenWaveSettings(context: Context) {
         get() = prefs.getLong(KEY_SHARE_LAST, 0L)
         set(value) = prefs.edit().putLong(KEY_SHARE_LAST, value).apply()
 
+    /** Planned moment of the next download (epoch seconds), 0 = not planned yet; kept apart from the send. */
+    var shareFetchAt: Long
+        get() = prefs.getLong(KEY_SHARE_FETCH_AT, 0L)
+        set(value) = prefs.edit().putLong(KEY_SHARE_FETCH_AT, value).apply()
+
+    /**
+     * The board's signed device token ("id.sig", random, no link to the rider),
+     * empty = not registered. Forgotten when sharing is switched off, so a
+     * rider who turns it on again starts with a new one.
+     */
+    var shareDevice: String
+        get() = prefs.getString(KEY_SHARE_DEVICE, "").orEmpty()
+        set(value) = prefs.edit().putString(KEY_SHARE_DEVICE, value).apply()
+
     /** Last successful download of shared events (epoch seconds), 0 = never. */
     var shareLastFetch: Long
         get() = prefs.getLong(KEY_SHARE_FETCH, 0L)
@@ -75,6 +89,8 @@ internal class GreenWaveSettings(context: Context) {
         const val KEY_SHARE_NEXT = "share_next_at"
         const val KEY_SHARE_LAST = "share_last_sent"
         const val KEY_SHARE_FETCH = "share_last_fetch"
+        const val KEY_SHARE_FETCH_AT = "share_fetch_at"
+        const val KEY_SHARE_DEVICE = "share_device"
         const val KEY_AUTO_EXPORT = "auto_export"
         const val KEY_MIN = "range_min_kmh"
         const val KEY_MAX = "range_max_kmh"

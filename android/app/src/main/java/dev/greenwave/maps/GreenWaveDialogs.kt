@@ -269,7 +269,9 @@ internal object GreenWaveDialogs {
                 !settings.shareEnabled -> "Aus. Einschalten unter Einstellungen → „Gemeinsam lernen (anonym)“."
                 settings.shareServerUrl.isBlank() -> "An, aber kein Server eingetragen (Einstellungen). Bis dahin wird nichts gesendet."
                 else -> "Wartend: $queued Ereignisse\nNächster Versand: ${at(settings.shareNextAt)}\n" +
-                    "Zuletzt: ${at(settings.shareLastSent)}\nServer: ${settings.shareServerUrl}"
+                    "Zuletzt gesendet: ${at(settings.shareLastSent)}\n" +
+                    "Nächster Abruf: ${at(settings.shareFetchAt)}\nZuletzt abgerufen: ${at(settings.shareLastFetch)}\n" +
+                    "Nur im WLAN, 8–21 Uhr. Server: ${settings.shareServerUrl}"
             }
             activity.runOnUiThread {
                 if (activity.isFinishing || activity.isDestroyed) return@runOnUiThread
@@ -407,8 +409,14 @@ internal object GreenWaveDialogs {
                 settings.shareEnabled = share.isChecked
                 // Nothing queued may leave the device once sharing is off or the rider runs red.
                 if (!share.isChecked || red.isChecked) Thread { ShareQueue.clear(context.applicationContext) }.start()
+                // Off means a new device token next time, so turning it off and on breaks the link to earlier uploads.
+                if (!share.isChecked) settings.shareDevice = ""
                 val url = shareUrl.text.toString().trim()
-                if (url.isEmpty() || url.startsWith("https://")) settings.shareServerUrl = url
+                if (url.isEmpty() || url.startsWith("https://")) {
+                    // A token belongs to one board.
+                    if (url != settings.shareServerUrl) settings.shareDevice = ""
+                    settings.shareServerUrl = url
+                }
                 else Toast.makeText(context, "Server-Adresse muss mit https:// beginnen, nicht gespeichert.", Toast.LENGTH_LONG).show()
             }
             .setNegativeButton("Abbrechen", null)

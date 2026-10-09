@@ -47,4 +47,53 @@ class ShareScheduleTest {
         assertTrue(ShareSchedule.due(100, 100))
         assertTrue(ShareSchedule.due(50, 100))
     }
+
+    private fun at(day: Int, hour: Int, minute: Int = 0) =
+        ZonedDateTime.of(2026, 10, day, hour, minute, 0, 0, ZoneOffset.ofTotalSeconds(cest)).toEpochSecond()
+
+    @Test
+    fun windowIsDaytimeLocal() {
+        assertFalse(ShareSchedule.inWindow(at(9, 7, 59), cest))
+        assertTrue(ShareSchedule.inWindow(at(9, 8, 0), cest))
+        assertTrue(ShareSchedule.inWindow(at(9, 20, 59), cest))
+        assertFalse(ShareSchedule.inWindow(at(9, 21, 0), cest))
+        assertFalse(ShareSchedule.inWindow(at(9, 3, 0), cest))
+    }
+
+    @Test
+    fun postponeGoesToTheNextWindowNeverAtNight() {
+        repeat(100) { seed ->
+            val early = local(ShareSchedule.postpone(at(9, 5, 0), cest, Random(seed)))
+            assertEquals(9, early.dayOfMonth, "$early")
+            assertTrue(early.hour in 8..20, "$early")
+            val late = local(ShareSchedule.postpone(at(9, 22, 30), cest, Random(seed)))
+            assertEquals(10, late.dayOfMonth, "$late")
+            assertTrue(late.hour in 8..20, "$late")
+            // Inside the window a missed exchange waits for tomorrow's window rather than right away (not tied to waking up).
+            val day = local(ShareSchedule.postpone(at(9, 12, 0), cest, Random(seed)))
+            assertEquals(10, day.dayOfMonth, "$day")
+        }
+    }
+
+    @Test
+    fun postponedFetchStaysApartFromTheSend() {
+        repeat(100) { seed ->
+            val send = at(10, 9, 0)
+            val fetch = ShareSchedule.postpone(at(9, 22, 0), cest, Random(seed), apartFrom = send)
+            assertTrue(kotlin.math.abs(fetch - send) >= ShareSchedule.MIN_GAP_SEC, "${local(fetch)}")
+            assertTrue(local(fetch).hour in 8..20)
+        }
+    }
+
+    @Test
+    fun fetchIsPlannedApartFromTheSend() {
+        val now = at(9, 3)
+        repeat(200) { seed ->
+            val random = Random(seed)
+            val send = ShareSchedule.next(now, cest, random)
+            val fetch = ShareSchedule.nextApart(now, cest, send, random)
+            assertTrue(kotlin.math.abs(fetch - send) >= ShareSchedule.MIN_GAP_SEC, "send ${local(send)} fetch ${local(fetch)}")
+            assertTrue(local(fetch).hour in 8..20)
+        }
+    }
 }
