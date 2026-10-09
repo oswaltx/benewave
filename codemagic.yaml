@@ -1,0 +1,52 @@
+# greenWave Maps – iOS feasibility build (stage 0, docs in the greenwave project: IOS-KONZEPT.md).
+# Builds the CoMaps iOS app of this fork unsigned (for SideStore/AltStore re-signing) and the
+# GreenWaveShared XCFramework from android/greenwave. Started manually; free personal plan
+# (500 macOS M2 minutes per month), no signing, no publishing.
+workflows:
+  ios-unsigned:
+    name: iOS unsigned IPA + GreenWaveShared
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+    environment:
+      xcode: 26.1
+      java: 21
+    cache:
+      cache_paths:
+        - $HOME/.gradle/caches
+        - $HOME/.konan
+    scripts:
+      - name: Submodules
+        script: git submodule update --depth 1 --init --recursive --jobs 16
+      - name: Build dependencies
+        script: |
+          brew install qt optipng
+          pip3 install "protobuf<3.21" --break-system-packages
+          xcodebuild -downloadComponent metalToolchain
+      - name: Configure repository
+        script: ./configure.sh
+      - name: GreenWaveShared XCFramework
+        script: |
+          cd android
+          ./gradlew --no-daemon -Dorg.gradle.jvmargs=-Xmx3g :greenwave:jvmTest :greenwave:assembleGreenWaveSharedReleaseXCFramework
+      - name: Archive iOS app (unsigned)
+        script: |
+          set -o pipefail
+          xcodebuild archive \
+            -workspace xcode/CoMaps.xcworkspace \
+            -scheme CoMaps \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/CoMaps.xcarchive \
+            -quiet \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+      - name: Package unsigned IPA
+        script: |
+          rm -rf build/Payload && mkdir -p build/Payload
+          cp -R build/CoMaps.xcarchive/Products/Applications/*.app build/Payload/
+          (cd build && zip -qry greenwave-maps-unsigned.ipa Payload)
+          ls -la build/greenwave-maps-unsigned.ipa
+    artifacts:
+      - build/greenwave-maps-unsigned.ipa
+      - android/greenwave/build/XCFrameworks/release/**
+      - android/greenwave/build/reports/tests/**
