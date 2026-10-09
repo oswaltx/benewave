@@ -23,8 +23,8 @@ import kotlin.random.Random
  * Around a begin or end the first and last [edgeSec] of events are dropped as
  * well: after a cold start the first fix can lie hundreds of meters from where
  * the rider set off. If GPS then jumps faster than [jumpSpeedMps] within those
- * first [edgeSec], the fix after the jump counts as a begin too, so the cut also
- * lies around the real start. A restart that loses the recording loses its
+ * first [edgeSec], the fix after the jump gets a cut of its own, so the cut also
+ * lies around the real start (the quiet time stays that of the first fix). A restart that loses the recording loses its
  * events too (they are only queued at the end), so nothing of it is shared.
  *
  * A single fix farther than [pauseMeters] from a stay (a GPS outlier) does not
