@@ -75,4 +75,33 @@ class RouteAdviceTest {
         val past = RouteAdvice.advice(Route(path, listOf(light(300.0))), setOf(north(300.0)), here.copy(position = north(400.0)), range)
         assertEquals(RouteAdvice.Advice(null, false, null), past)
     }
+
+    @Test
+    fun liveWinsEvenOverAnUnconfidentEstimateWithoutAskingForIt() {
+        val a = north(300.0)
+        val live = light(300.0, offset = 42)
+        val resolved = RouteAdvice.resolve(listOf(a), mapOf(a to live)) { error("estimate asked for a live light") }
+        assertEquals(setOf(a), resolved.known)
+        assertEquals(listOf(live), resolved.lights)
+    }
+
+    @Test
+    fun emptyInputsGiveNoAdvice() {
+        val none = RouteAdvice.Advice(null, false, null)
+        assertTrue(RouteAdvice.resolve(emptyList(), emptyMap()) { null }.lights.isEmpty())
+        assertEquals(none, RouteAdvice.advice(Route(path, emptyList()), emptySet(), here, range))
+        val unknownOnly = RouteAdvice.advice(Route(path, listOf(light(300.0), light(600.0))), emptySet(), here, range)
+        assertFalse(unknownOnly.nextLightKnown)
+        assertNull(unknownOnly.options)
+    }
+
+    @Test
+    fun unknownSiblingThenKnownThenUnknownFurtherOn() {
+        val sibling = light(300.0, offset = 45); val known = light(320.0); val unknown = light(700.0, offset = 60)
+        val route = Route(path, listOf(sibling, known, unknown))
+        val advice = RouteAdvice.advice(route, setOf(known.position), here, range)
+        assertTrue(advice.nextLightKnown)
+        val onlyKnown = SpeedOptionsCalculator.compute(route.copy(trafficLights = listOf(known)), here.position, here.epochSec, here.speedKmh, range)
+        assertEquals(onlyKnown, advice.options)
+    }
 }

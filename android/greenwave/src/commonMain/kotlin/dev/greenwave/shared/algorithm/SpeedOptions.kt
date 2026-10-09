@@ -25,6 +25,9 @@ data class SpeedOptions(
     val fasterOutOfRange: Boolean = false,
 )
 
+/** The rider's preferred speed range. */
+data class SpeedRangeKmh(val min: Double, val max: Double)
+
 /**
  * For the next light ahead, the speeds in [SpeedRangeKmh] that arrive on green
  * form bands (one per green phase). The nearest band above the current speed
@@ -38,8 +41,12 @@ data class SpeedOptions(
  * So that there are two options whenever possible, a side without a band in
  * [SpeedRangeKmh] takes the nearest band in [OUTER_RANGE] instead (flagged as
  * out of range). Bands inside the range always win over ones outside it.
+ *
+ * Internal on purpose: it trusts every light in the route it gets. Callers on
+ * Android and iOS go through [dev.greenwave.shared.guidance.RouteAdvice], which
+ * passes only live or learned lights (the speed-advice invariant).
  */
-object SpeedOptionsCalculator {
+internal object SpeedOptionsCalculator {
     /** Still plausible on a bicycle; options beyond the rider's own range come from here. */
     val OUTER_RANGE = SpeedRangeKmh(min = 5.0, max = 35.0)
 
