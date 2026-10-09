@@ -19,25 +19,24 @@ workflows:
         script: git submodule update --depth 1 --init --recursive --jobs 16
       - name: Build dependencies
         script: |
-          brew install qt optipng
-          pip3 install "protobuf<3.21" --break-system-packages
+          brew install cmake ninja jq optipng qt
           xcodebuild -downloadComponent metalToolchain
+          xcodebuild -downloadPlatform iOS || true
       - name: Configure repository
         script: ./configure.sh
       - name: GreenWaveShared XCFramework
         script: |
           cd android
+          [ -f local.properties ] || echo "sdk.dir=${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}" > local.properties
           ./gradlew --no-daemon -Dorg.gradle.jvmargs=-Xmx3g :greenwave:jvmTest :greenwave:assembleGreenWaveSharedReleaseXCFramework
       - name: Archive iOS app (unsigned)
         script: |
-          set -o pipefail
           xcodebuild archive \
             -workspace xcode/CoMaps.xcworkspace \
             -scheme CoMaps \
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath build/CoMaps.xcarchive \
-            -quiet \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO
       - name: Package unsigned IPA
