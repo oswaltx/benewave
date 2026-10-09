@@ -12,12 +12,11 @@ import androidx.core.app.NotificationCompat
 import app.organicmaps.sdk.Framework
 import app.organicmaps.sdk.Router
 import app.organicmaps.sdk.routing.RoutingController
-import dev.greenwave.shared.algorithm.Intersections
 import dev.greenwave.shared.algorithm.SpeedOptions
-import dev.greenwave.shared.algorithm.SpeedOptionsCalculator
 import dev.greenwave.shared.algorithm.SpeedRangeKmh
 import dev.greenwave.shared.data.RandomTrafficTimingGenerator
 import dev.greenwave.shared.geo.LatLng
+import dev.greenwave.shared.guidance.RouteAdvice
 import dev.greenwave.shared.geo.distanceAlongPath
 import dev.greenwave.shared.geo.bearingDegrees
 import dev.greenwave.shared.geo.distanceMeters
@@ -60,13 +59,10 @@ import kotlin.math.roundToInt
  * light and direction ([LightEventStore]). Once a light's program can be
  * learned from them ([ObservationCycleEstimator]) or comes from a live source
  * (Hamburg), it replaces the placeholder ([RandomTrafficTimingGenerator]),
- * which is never used for advice.
+ * which is never used for advice (enforced in RouteAdvice, shared with iOS).
  */
 object GreenWaveController {
     private const val TAG = "GreenWave"
-
-    /** Only lights this far ahead count for the advice; farther ones are too uncertain. */
-    private const val LOOKAHEAD_METERS = 2_000.0
 
     /** Approach and exit of a light are measured this far before and after it (as in MovementResolver). */
     private const val MOVEMENT_METERS = 40.0
@@ -84,9 +80,6 @@ object GreenWaveController {
     /** Re-query Overpass only if this share of a new route leaves the area already covered. */
     private const val UNCOVERED_SHARE_FOR_REQUERY = 0.15
 
-    /** Measured rhythms below this confidence are not trusted over the placeholder. */
-    private const val MIN_CONFIDENCE = 0.5
-
     /** Waits before re-trying a failed Overpass lookup on the same route. */
     private val RETRY_DELAYS_MS = longArrayOf(30_000, 60_000, 120_000, 300_000)
 
@@ -96,21 +89,9 @@ object GreenWaveController {
         val status: LightsStatus,
         val lightCount: Int,
         val learnedCount: Int,
-        val advice: Advice?,
+        val advice: RouteAdvice.Advice?,
         /** Of [learnedCount], lights whose timing comes from a live source (Hamburg). */
         val liveCount: Int = 0,
-    )
-
-    /**
-     * What the panel and notification show for the next light. Without a learned
-     * cycle for it ([nextLightKnown] false) there is deliberately no speed:
-     * the placeholder timing would only be a guess.
-     */
-    data class Advice(
-        val nextLightDistanceMeters: Double?,
-        val nextLightKnown: Boolean,
-        /** Null if there is no light ahead or it is not known. */
-        val options: SpeedOptions?,
     )
 
     @Volatile private var route: Route? = null
@@ -418,29 +399,16 @@ object GreenWaveController {
     private fun publishRoute(revision: Int) {
         val path = lightsPath
         val now = System.currentTimeMillis() / 1000
-        val learnedSet = mutableSetOf<LatLng>()
         val live = liveLights
-        val lights = lightPositions.map { position ->
-            live[position]?.let {
-                learnedSet.add(position)
-                return@map it
-            }
+        // Live or learned programs; placeholders for the rest, which never give advice (RouteAdvice).
+        val resolved = RouteAdvice.resolve(lightPositions, live) { position ->
             val (approach, turn) = routeMovement(path, position)
             // A route that passes the signal at a distance runs on a way alongside it.
             val sideway = distanceToPath(path, position) > ROUTE_PASSES_SIGNAL_METERS
-            val estimate = learnedProgram(position, approach, now, turn, sideway)
-            if (estimate != null && estimate.confidence >= MIN_CONFIDENCE) {
-                learnedSet.add(position)
-                TrafficLight(
-                    position = position,
-                    cycleLengthSec = estimate.cycleLengthSec,
-                    greenStartOffsetSec = estimate.greenStartOffsetSec,
-                    greenDurationSec = estimate.greenDurationSec,
-                )
-            } else {
-                RandomTrafficTimingGenerator.deterministic(position)
-            }
+            learnedProgram(position, approach, now, turn, sideway)
         }
+        val lights = resolved.lights
+        val learnedSet = resolved.known
         this.lights = lights
         learnedPositions = learnedSet
         val count = learnedSet.size
@@ -789,7 +757,7 @@ object GreenWaveController {
                     cycleSec = estimate?.cycleLengthSec,
                     greenSec = estimate?.greenDurationSec,
                     confidence = estimate?.confidence,
-                    trusted = estimate != null && estimate.confidence >= MIN_CONFIDENCE,
+                    trusted = estimate != null && estimate.confidence >= RouteAdvice.MIN_CONFIDENCE,
                 )
             }.sortedWith(compareByDescending<LightStats> { it.trusted }.thenByDescending { it.stops + it.passes })
             main.post { onResult(stats) }
@@ -1115,29 +1083,7 @@ object GreenWaveController {
         if (location == null || lightsStatus != LightsStatus.READY) {
             return State(lightsStatus, current.trafficLights.size, learnedCount, null, liveCount)
         }
-        val update = location.toUpdate()
-        val progress = distanceAlongPath(current.path, update.position)
-        val learned = routeLearned
-        // One light per intersection, the known one if there is any (see Intersections).
-        val ahead = Intersections.representatives(
-            current.trafficLights
-                .map { it to distanceAlongPath(current.path, it.position) - progress }
-                .filter { it.second > 0 && it.second <= LOOKAHEAD_METERS }
-                .sortedBy { it.second },
-            isKnown = { it.position in learned },
-        )
-        val next = ahead.firstOrNull()
-            ?: return State(LightsStatus.READY, current.trafficLights.size, learnedCount, Advice(null, false, null), liveCount)
-        val known = next.first.position in learned
-        // Only learned lights take part; an unknown one further on must not steer the speed either.
-        val learnedAhead = ahead.map { it.first }.takeWhile { it.position in learned }
-        val options = if (!known) null else SpeedOptionsCalculator.compute(
-            route = current.copy(trafficLights = learnedAhead),
-            currentPosition = update.position,
-            nowEpochSec = update.epochSec,
-            currentSpeedKmh = update.speedKmh,
-            speedRange = speedRange,
-        )
-        return State(LightsStatus.READY, current.trafficLights.size, learnedCount, Advice(next.second, known, options), liveCount)
+        val advice = RouteAdvice.advice(current, routeLearned, location.toUpdate(), speedRange)
+        return State(LightsStatus.READY, current.trafficLights.size, learnedCount, advice, liveCount)
     }
 }
