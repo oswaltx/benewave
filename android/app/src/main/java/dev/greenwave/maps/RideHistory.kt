@@ -35,6 +35,9 @@ internal data class RideSummary(
 /** Reads the track files back for display. Worker-only (file IO). */
 internal object RideHistory {
     private const val MAX_ACCURACY_M = 30.0
+    private const val MIN_TRIP_METERS = 500.0
+    private const val FAST_KMH = 40.0
+    private const val MAX_FAST_SHARE = 0.05
 
     fun summaries(context: Context, stops: List<StopEvent>, rides: List<Ride>, lights: List<LatLng>): List<RideSummary> =
         TrackFile.all(context).filter { it.name.endsWith(".csv") }.mapNotNull { summarize(it, stops, rides, lights) }
@@ -98,11 +101,20 @@ internal object RideHistory {
     /** Name of the track (and of the category CoMaps' import creates for it). */
     fun trackName(summary: RideSummary): String = "greenWave ${title(summary)}"
 
-    /** Every track as input for the way comparison (accurate fixes only, plus the first suggested route). */
+    /**
+     * Every bicycle ride from one place to another as input for the way
+     * comparison (accurate fixes only, plus the first suggested route). Round
+     * trips (start near the end) are left out, they are not A-to-B rides, and so
+     * are tracks with more than [MAX_FAST_SHARE] of the fixes above
+     * [FAST_KMH] (tram, train, car in tracking mode).
+     */
     fun ways(context: Context): List<RideWay> =
         TrackFile.all(context).filter { it.name.endsWith(".csv") }.mapNotNull { file ->
             val fixes = read(file).filter { it.accuracy == null || it.accuracy <= MAX_ACCURACY_M }
             if (fixes.size < 2) return@mapNotNull null
+            if (distanceMeters(fixes.first().position, fixes.last().position) < MIN_TRIP_METERS) return@mapNotNull null
+            val speeds = fixes.mapNotNull { it.speedKmh }
+            if (speeds.isNotEmpty() && speeds.count { it > FAST_KMH } > speeds.size * MAX_FAST_SHARE) return@mapNotNull null
             val path = fixes.map { it.position }
             RideWay(
                 startEpochSec = fixes.first().epochSec,

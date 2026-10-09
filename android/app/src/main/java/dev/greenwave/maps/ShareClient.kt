@@ -27,12 +27,12 @@ internal object ShareClient {
 
     data class Box(val minLat: Double, val minLon: Double, val maxLat: Double, val maxLon: Double)
 
-    /** The board refused the request itself (HTTP 4xx): sending the same again will not help. */
+    /** The board refused the content itself (HTTP 400 invalid rows, 413 too large): sending the same again will not help. */
     class Rejected(message: String) : Exception(message)
 
     /**
      * Sends one request of at most [MAX_PER_POST] events; returns how many the
-     * board stored (duplicates excluded). Throws [Rejected] on 4xx, other
+     * board stored (duplicates excluded). Throws [Rejected] on 400/413, other
      * exceptions on network or server trouble.
      */
     fun upload(base: String, events: List<LightEvent>): Int {
@@ -65,7 +65,8 @@ internal object ShareClient {
             val code = connection.responseCode
             if (code != HttpURLConnection.HTTP_OK) {
                 val detail = connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty().take(200)
-                if (code in 400..499) throw Rejected("board HTTP $code: $detail")
+                // Only the board's own content errors; 401/403/404/408/429 (proxy, wrong address) keep the queue for a retry.
+                if (code == 400 || code == 413) throw Rejected("board HTTP $code: $detail")
                 error("board HTTP $code: $detail")
             }
             return JSONObject(connection.inputStream.bufferedReader().use { it.readText() })

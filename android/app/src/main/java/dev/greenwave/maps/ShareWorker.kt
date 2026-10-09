@@ -37,7 +37,8 @@ internal class ShareWorker(context: Context, params: WorkerParameters) : Worker(
             return Result.success()
         }
         val base = settings.shareServerUrl.trim().trimEnd('/')
-        if (!settings.shareEnabled || base.isEmpty()) return Result.success()
+        // https only, also for an address saved before the dialog enforced it.
+        if (!settings.shareEnabled || !base.startsWith("https://")) return Result.success()
         val now = System.currentTimeMillis() / 1000
         val offset = TimeZone.getDefault().getOffset(now * 1000) / 1000
         if (settings.shareNextAt == 0L) settings.shareNextAt = ShareSchedule.next(now, offset)
@@ -51,11 +52,12 @@ internal class ShareWorker(context: Context, params: WorkerParameters) : Worker(
         val fetched = runCatching { fetch(context, base, now) }
             .onFailure { Log.w(TAG, "fetching from the board failed, retrying later", it) }
             .isSuccess
-        if (sent && fetched) {
+        if (sent) {
+            // The weekly rhythm follows the send; a failed fetch alone must not turn it into daily sends.
             settings.shareLastSent = now
             settings.shareNextAt = ShareSchedule.next(now, offset)
-            return Result.success()
         }
+        if (sent && fetched) return Result.success()
         return if (runAttemptCount < MAX_ATTEMPTS) Result.retry() else Result.failure()
     }
 
