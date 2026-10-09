@@ -164,6 +164,37 @@ internal object GreenWaveDialogs {
                     else setItems(rows.toTypedArray()) { _, which -> showRide(activity, rides[which]) }
                 }
                 .setPositiveButton("OK", null)
+                .apply { if (rides.size >= 2) setNeutralButton("Wegvergleich") { _, _ -> showWayComparison(activity) } }
+                .show()
+        }
+    }
+
+    /** Per pair of places ridden more than once: the ways taken there, fastest first. */
+    private fun showWayComparison(activity: Activity) {
+        GreenWaveController.wayComparison { connections ->
+            if (activity.isFinishing || activity.isDestroyed) return@wayComparison
+            val text = if (connections.isEmpty()) {
+                "Noch keine Strecke mehrmals gefahren (Start und Ziel jeweils innerhalb von 300 m). " +
+                    "Sobald du dieselbe Strecke öfter fährst, steht hier, welcher Weg im Schnitt schneller ist."
+            } else {
+                connections.mapIndexed { i, c ->
+                    val km = "%.1f".format(Locale.GERMAN, c.ways.first().meanLengthMeters / 1000)
+                    val header = "Strecke ${i + 1}: ${c.rideCount} Fahrten, seit ${RideHistory.day(c.ways.flatMap { it.rides }.minOf { it.startEpochSec })}, ca. $km km"
+                    val fastest = c.ways.first().meanDurationSec
+                    val lines = c.ways.mapIndexed { w, way ->
+                        val diff = way.meanDurationSec - fastest
+                        val km2 = "%.1f".format(Locale.GERMAN, way.meanLengthMeters / 1000)
+                        "  Weg ${w + 1}: Ø ${RideHistory.minutes(way.meanDurationSec)} (${way.rides.size}×, $km2 km)" +
+                            (if (w > 0) " · ${RideHistory.minutes(diff)} langsamer" else if (c.ways.size > 1) " · am schnellsten" else "") +
+                            (if (way.suggestedByNavigation) " · Navi-Vorschlag" else "")
+                    }
+                    (listOf(header) + lines).joinToString("\n")
+                }.joinToString("\n\n") + "\n\nDauer von Tür zu Tür, Stopps eingerechnet."
+            }
+            MaterialAlertDialogBuilder(activity)
+                .setTitle("Wegvergleich")
+                .setMessage(text)
+                .setPositiveButton("OK", null)
                 .show()
         }
     }

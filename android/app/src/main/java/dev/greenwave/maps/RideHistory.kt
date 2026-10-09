@@ -1,6 +1,7 @@
 package dev.greenwave.maps
 
 import android.content.Context
+import dev.greenwave.shared.analysis.RideWay
 import dev.greenwave.shared.geo.LatLng
 import dev.greenwave.shared.geo.distanceMeters
 import dev.greenwave.shared.tracking.StopEvent
@@ -97,8 +98,33 @@ internal object RideHistory {
     /** Name of the track (and of the category CoMaps' import creates for it). */
     fun trackName(summary: RideSummary): String = "greenWave ${title(summary)}"
 
+    /** Every track as input for the way comparison (accurate fixes only, plus the first suggested route). */
+    fun ways(context: Context): List<RideWay> =
+        TrackFile.all(context).filter { it.name.endsWith(".csv") }.mapNotNull { file ->
+            val fixes = read(file).filter { it.accuracy == null || it.accuracy <= MAX_ACCURACY_M }
+            if (fixes.size < 2) return@mapNotNull null
+            val path = fixes.map { it.position }
+            RideWay(
+                startEpochSec = fixes.first().epochSec,
+                durationSec = fixes.last().epochSec - fixes.first().epochSec,
+                lengthMeters = path.zipWithNext { a, b -> distanceMeters(a, b) }.sum(),
+                path = path,
+                suggested = suggestedPath(file),
+            )
+        }
+
+    /** The first route suggested during the ride (routes.json, `path_latlon` as flat lat/lon pairs). */
+    private fun suggestedPath(track: File): List<LatLng>? {
+        val routes = File(track.path.removeSuffix(".csv") + "-routes.json").takeIf { it.exists() } ?: return null
+        val flat = runCatching { JSONArray(routes.readText()).optJSONObject(0)?.optJSONArray("path_latlon") }.getOrNull() ?: return null
+        return (0 until flat.length() / 2).map { LatLng(latitude = flat.getDouble(2 * it), longitude = flat.getDouble(2 * it + 1)) }
+            .takeIf { it.size >= 2 }
+    }
+
     fun title(summary: RideSummary): String =
         SimpleDateFormat("EE dd.MM. HH:mm", Locale.GERMAN).format(Date(summary.startEpochSec * 1000))
+
+    fun day(epochSec: Long): String = SimpleDateFormat("dd.MM.", Locale.GERMAN).format(Date(epochSec * 1000))
 
     fun minutes(sec: Long): String = if (sec < 60) "$sec s" else "${(sec / 60.0).roundToInt()} min"
 

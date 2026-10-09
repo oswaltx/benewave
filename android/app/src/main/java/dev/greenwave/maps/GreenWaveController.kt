@@ -32,6 +32,8 @@ import dev.greenwave.shared.routing.TrafficLightsAlongRoute
 import dev.greenwave.shared.tracking.LightEvent
 import dev.greenwave.shared.matching.MapMatcher
 import dev.greenwave.shared.matching.RoadNetwork
+import dev.greenwave.shared.analysis.Connection
+import dev.greenwave.shared.analysis.WayComparison
 import dev.greenwave.shared.sharing.ShareTrim
 import dev.greenwave.shared.tracking.EdgeTrim
 import dev.greenwave.shared.tracking.MovementResolver
@@ -975,6 +977,16 @@ object GreenWaveController {
                     context, store?.all().orEmpty(), rideLog?.all().orEmpty(), knownLights?.all().orEmpty(),
                 )
             }.onFailure { Log.w(TAG, "reading rides failed", it) }.getOrDefault(emptyList())
+            main.post { onResult(list) }
+        }
+    }
+
+    /** Which way between the same places was faster (see [WayComparison]); [onResult] runs on main. */
+    internal fun wayComparison(onResult: (List<Connection>) -> Unit) {
+        val context = appContext ?: return
+        worker.execute {
+            val list = runCatching { WayComparison.compare(RideHistory.ways(context)) }
+                .onFailure { Log.w(TAG, "way comparison failed", it) }.getOrDefault(emptyList())
             main.post { onResult(list) }
         }
     }
