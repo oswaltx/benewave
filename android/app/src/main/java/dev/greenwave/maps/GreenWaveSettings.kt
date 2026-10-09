@@ -49,9 +49,13 @@ internal class GreenWaveSettings(context: Context) {
         get() = prefs.getBoolean(KEY_SHARE, false)
         set(value) = prefs.edit().putBoolean(KEY_SHARE, value).apply()
 
-    /** Base address of the shared board, e.g. https://host:port; empty = not set, nothing is sent. */
+    /**
+     * Base address of the shared board, e.g. https://host:port; empty = not set,
+     * nothing is sent. No board is preset
+     * ([DEFAULT_SHARE_URL] is empty); sharing itself stays off until switched on.
+     */
     var shareServerUrl: String
-        get() = prefs.getString(KEY_SHARE_URL, "").orEmpty()
+        get() = prefs.getString(KEY_SHARE_URL, DEFAULT_SHARE_URL).orEmpty()
         set(value) = prefs.edit().putString(KEY_SHARE_URL, value.trim()).apply()
 
     /** Planned moment of the next send (epoch seconds), 0 = not planned yet. */
@@ -84,6 +88,8 @@ internal class GreenWaveSettings(context: Context) {
         set(value) = prefs.edit().putLong(KEY_SHARE_FETCH, value).apply()
 
     private companion object {
+        /** No board preset: riders enter the address of a board they trust. */
+        const val DEFAULT_SHARE_URL = ""
         const val KEY_SHARE = "share_enabled"
         const val KEY_SHARE_URL = "share_server_url"
         const val KEY_SHARE_NEXT = "share_next_at"
