@@ -32,6 +32,7 @@ import dev.greenwave.shared.routing.TrafficLightsAlongRoute
 import dev.greenwave.shared.tracking.LightEvent
 import dev.greenwave.shared.matching.MapMatcher
 import dev.greenwave.shared.matching.RoadNetwork
+import dev.greenwave.shared.sharing.ShareTrim
 import dev.greenwave.shared.tracking.EdgeTrim
 import dev.greenwave.shared.tracking.MovementResolver
 import dev.greenwave.shared.tracking.RideGuard
@@ -138,6 +139,10 @@ object GreenWaveController {
     private var guard = RideGuard()
     /** Worker-only, per ride: no learning near the ride's start and end (see [EdgeTrim]). */
     private var edges = EdgeTrim()
+    /** Worker-only, per ride: what of this ride may be shared (see [ShareTrim]). */
+    private var shareTrim = ShareTrim()
+    /** Worker-only: events other riders shared (see [ShareWorker]), learned from like own ones. */
+    private var sharedEvents: LightEventStore? = null
     private var learning = true
     private var lastPosition: LatLng? = null
     /** Worker-only: the last minutes of fixes, for map matching around a light (see [matchEvents]). */
@@ -242,6 +247,7 @@ object GreenWaveController {
         worker.execute {
             store = StopEventStore(appContext).also { loggedStops = it.all().size }
             lightEvents = LightEventStore(appContext)
+            sharedEvents = LightEventStore(appContext, LightEventStore.SHARED_FILE, watch = true)
             knownLights = KnownLights(appContext)
             rideLog = RideLog(appContext).also {
                 profileRange = it.profileRange()
@@ -250,6 +256,7 @@ object GreenWaveController {
         }
         RoutingController.get().addRouteChangedListener { onRouteChanged() }
         onRouteChanged()
+        ShareWorker.schedule(appContext)
     }
 
     private fun onRouteChanged() {
@@ -529,6 +536,7 @@ object GreenWaveController {
     private fun startRideEvents() {
         guard = RideGuard()
         edges = EdgeTrim()
+        shareTrim = ShareTrim()
         stopDetector = StopDetector()
         passDetector = PassDetector()
         learning = true
@@ -543,6 +551,12 @@ object GreenWaveController {
         val dropped = edges.end()
         if (dropped > 0) Log.i(TAG, "dropped $dropped light events near the end of the ride")
         val context = appContext
+        val shareable = shareTrim.end()
+        // Riders who often cross on red would teach others wrong green phases.
+        if (context != null && settings?.shareEnabled == true && settings?.runsRed != true && shareable.isNotEmpty()) {
+            ShareQueue.add(context, shareable)
+            Log.i(TAG, "queued ${shareable.size} light events for sharing")
+        }
         if (context != null && settings?.autoExport == true) DataExport.toDocuments(context)
     }
 
@@ -553,6 +567,7 @@ object GreenWaveController {
      */
     private fun shouldLearn(update: LocationUpdate): Boolean {
         lastPosition = update.position
+        shareTrim.onFix(update.position)
         recentFixes.addLast(update)
         while (recentFixes.isNotEmpty() && update.epochSec - recentFixes.first().epochSec > RECENT_FIXES_SEC) {
             recentFixes.removeFirst()
@@ -650,6 +665,7 @@ object GreenWaveController {
     private fun storeResolved(events: List<LightEvent>) {
         if (events.isEmpty()) return
         lightEvents?.addAll(events)
+        shareTrim.add(events)
         Log.i(TAG, "light events stored: " + events.joinToString { "${it.kind} ${it.headingDeg}->${it.exitHeadingDeg} ${it.turn}" })
     }
 
@@ -665,7 +681,8 @@ object GreenWaveController {
         turn: LightEvent.Turn? = null,
         sideway: Boolean? = null,
     ): RhythmEstimate? {
-        val events = lightEvents?.at(position).orEmpty().filter { it.sameMovement(headingDeg, turn) && it.sameSide(sideway) }
+        val events = (lightEvents?.at(position).orEmpty() + sharedEvents?.at(position).orEmpty())
+            .filter { it.sameMovement(headingDeg, turn) && it.sameSide(sideway) }
         // Stops logged before light events existed count too (direction unknown).
         val since = lightEvents?.all()?.firstOrNull()?.epochSec ?: Long.MAX_VALUE
         val legacy = store?.all().orEmpty()
@@ -890,7 +907,7 @@ object GreenWaveController {
         if (!GreenWaveTrackingService.running) return
         val lights = areaLights
         if (lights.isEmpty()) return
-        val byLight = lightEvents?.all().orEmpty().groupBy { it.light }
+        val byLight = allEvents().groupBy { it.light }
         val now = System.currentTimeMillis() / 1000
         val marks = lights.map { position ->
             val events = byLight[position].orEmpty()
@@ -1035,7 +1052,10 @@ object GreenWaveController {
     }
 
     /** Worker: lights with at least one logged event (stop or pass). */
-    private fun lightsWithData(): Set<LatLng> = lightEvents?.all().orEmpty().mapTo(HashSet()) { it.light }
+    private fun lightsWithData(): Set<LatLng> = allEvents().mapTo(HashSet()) { it.light }
+
+    /** Worker: own and shared light events together. */
+    private fun allEvents(): List<LightEvent> = lightEvents?.all().orEmpty() + sharedEvents?.all().orEmpty()
 
     /** Main thread: coloured dots on the map. */
     private fun showMarks(marks: List<Pair<LatLng, Int>>) {

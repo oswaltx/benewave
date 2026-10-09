@@ -85,6 +85,7 @@ internal object GreenWaveDialogs {
         )
         if (tracks.isNotEmpty()) items.add("Aufzeichnungen teilen (${TrackFile.count(activity)})" to { shareTracks(activity, tracks) })
         items.add("Daten exportieren" to { exportData(activity) })
+        items.add("Gemeinsam lernen" to { showSharing(activity) })
         MaterialAlertDialogBuilder(activity)
             .setTitle("greenWave")
             .setItems(items.map { it.first }.toTypedArray()) { _, which -> items[which].second() }
@@ -225,6 +226,37 @@ internal object GreenWaveDialogs {
         }
     }
 
+    /** State of sharing with other riders, with "Jetzt senden". */
+    private fun showSharing(activity: Activity) {
+        val settings = GreenWaveController.settings() ?: return
+        val app = activity.applicationContext
+        Thread {
+            val queued = ShareQueue.size(app)
+            val format = java.text.SimpleDateFormat("EE dd.MM. HH:mm", Locale.GERMAN)
+            fun at(epochSec: Long) = if (epochSec == 0L) "–" else format.format(java.util.Date(epochSec * 1000))
+            val message = when {
+                !settings.shareEnabled -> "Aus. Einschalten unter Einstellungen → „Gemeinsam lernen (anonym)“."
+                settings.shareServerUrl.isBlank() -> "An, aber kein Server eingetragen (Einstellungen). Bis dahin wird nichts gesendet."
+                else -> "Wartend: $queued Ereignisse\nNächster Versand: ${at(settings.shareNextAt)}\n" +
+                    "Zuletzt: ${at(settings.shareLastSent)}\nServer: ${settings.shareServerUrl}"
+            }
+            activity.runOnUiThread {
+                if (activity.isFinishing || activity.isDestroyed) return@runOnUiThread
+                val dialog = MaterialAlertDialogBuilder(activity)
+                    .setTitle("Gemeinsam lernen")
+                    .setMessage(message)
+                    .setNegativeButton("Schließen", null)
+                if (settings.shareEnabled && settings.shareServerUrl.isNotBlank()) {
+                    dialog.setPositiveButton("Jetzt senden") { _, _ ->
+                        ShareWorker.sendNow(app)
+                        Toast.makeText(activity, "Wird gesendet, sobald Netz da ist.", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                dialog.show()
+            }
+        }.start()
+    }
+
     /** Everything learned so far, one line per light. */
     fun showLightData(activity: Activity) {
         GreenWaveController.lightStats { stats ->
@@ -297,6 +329,24 @@ internal object GreenWaveDialogs {
             "Deine Fahrten werden dann markiert und später nicht für gemeinsame Ampeldaten verwendet, " +
                 "damit sie die Grünphasen nicht verfälschen.", small = true))
 
+        val share = SwitchCompat(context).apply {
+            text = "Gemeinsam lernen (anonym)"
+            isChecked = settings.shareEnabled
+        }
+        content.addView(share)
+        content.addView(text(context,
+            "Teilt einmal pro Woche, an einem zufälligen Tag und nur im WLAN, wann du an welcher Ampel gehalten " +
+                "hast oder bei Grün durchgefahren bist. Ohne Konto, ohne Spur; Ampeln im Umkreis von 400–600 m " +
+                "um Start und Ziel jeder Fahrt bleiben auf dem Gerät. Dafür lernt die App auch aus den Fahrten " +
+                "anderer.", small = true))
+        val shareUrl = EditText(context).apply {
+            hint = "Server, z. B. https://host:port"
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            setText(settings.shareServerUrl)
+            setSingleLine()
+        }
+        content.addView(shareUrl)
+
         val autoExport = SwitchCompat(context).apply {
             text = "Nach jeder Fahrt exportieren (Entwicklung)"
             isChecked = settings.autoExport
@@ -323,6 +373,9 @@ internal object GreenWaveDialogs {
                 settings.autoProfile = auto.isChecked
                 settings.runsRed = red.isChecked
                 settings.autoExport = autoExport.isChecked
+                settings.shareEnabled = share.isChecked
+                val url = shareUrl.text.toString().trim()
+                if (url.isEmpty() || url.startsWith("https://") || url.startsWith("http://")) settings.shareServerUrl = url
             }
             .setNegativeButton("Abbrechen", null)
             .show()

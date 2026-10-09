@@ -41,7 +41,40 @@ internal class GreenWaveSettings(context: Context) {
         get() = prefs.getBoolean(KEY_AUTO_EXPORT, false)
         set(value) = prefs.edit().putBoolean(KEY_AUTO_EXPORT, value).apply()
 
+    /**
+     * Share anonymised light events with other riders (weekly, see [ShareWorker])
+     * and learn from theirs. Off by default: the rider opts in.
+     */
+    var shareEnabled: Boolean
+        get() = prefs.getBoolean(KEY_SHARE, false)
+        set(value) = prefs.edit().putBoolean(KEY_SHARE, value).apply()
+
+    /** Base address of the shared board, e.g. https://host:port; empty = not set, nothing is sent. */
+    var shareServerUrl: String
+        get() = prefs.getString(KEY_SHARE_URL, "").orEmpty()
+        set(value) = prefs.edit().putString(KEY_SHARE_URL, value.trim()).apply()
+
+    /** Planned moment of the next send (epoch seconds), 0 = not planned yet. */
+    var shareNextAt: Long
+        get() = prefs.getLong(KEY_SHARE_NEXT, 0L)
+        set(value) = prefs.edit().putLong(KEY_SHARE_NEXT, value).apply()
+
+    /** Last successful exchange (epoch seconds), 0 = never. */
+    var shareLastSent: Long
+        get() = prefs.getLong(KEY_SHARE_LAST, 0L)
+        set(value) = prefs.edit().putLong(KEY_SHARE_LAST, value).apply()
+
+    /** Last successful download of shared events (epoch seconds), 0 = never. */
+    var shareLastFetch: Long
+        get() = prefs.getLong(KEY_SHARE_FETCH, 0L)
+        set(value) = prefs.edit().putLong(KEY_SHARE_FETCH, value).apply()
+
     private companion object {
+        const val KEY_SHARE = "share_enabled"
+        const val KEY_SHARE_URL = "share_server_url"
+        const val KEY_SHARE_NEXT = "share_next_at"
+        const val KEY_SHARE_LAST = "share_last_sent"
+        const val KEY_SHARE_FETCH = "share_last_fetch"
         const val KEY_AUTO_EXPORT = "auto_export"
         const val KEY_MIN = "range_min_kmh"
         const val KEY_MAX = "range_max_kmh"
