@@ -445,8 +445,8 @@ object GreenWaveController {
         learnedPositions = learnedSet
         val count = learnedSet.size
         val liveNow = lightPositions.count { it in live }
-        val withData = lightsWithData()
         val positions = lightPositions
+        val withData = lightsWithData(positions)
         main.post {
             if (revision == requestedRevision) {
                 route = Route(path = path, trafficLights = lights)
@@ -554,6 +554,8 @@ object GreenWaveController {
         if (dropped > 0) Log.i(TAG, "dropped $dropped light events near the end of the ride")
         val context = appContext
         val shareable = shareTrim.end()
+        // Fresh radii for whatever is recorded next (e.g. tracking goes on after the navigation ended).
+        shareTrim = ShareTrim()
         // Riders who often cross on red would teach others wrong green phases.
         if (context != null && settings?.shareEnabled == true && settings?.runsRed != true && shareable.isNotEmpty()) {
             ShareQueue.add(context, shareable)
@@ -683,7 +685,7 @@ object GreenWaveController {
         turn: LightEvent.Turn? = null,
         sideway: Boolean? = null,
     ): RhythmEstimate? {
-        val events = (lightEvents?.at(position).orEmpty() + sharedEvents?.at(position).orEmpty())
+        val events = (lightEvents?.at(position).orEmpty() + sharedEvents?.near(position).orEmpty())
             .filter { it.sameMovement(headingDeg, turn) && it.sameSide(sideway) }
         // Stops logged before light events existed count too (direction unknown).
         val since = lightEvents?.all()?.firstOrNull()?.epochSec ?: Long.MAX_VALUE
@@ -909,10 +911,10 @@ object GreenWaveController {
         if (!GreenWaveTrackingService.running) return
         val lights = areaLights
         if (lights.isEmpty()) return
-        val byLight = allEvents().groupBy { it.light }
+        val byLight = lightEvents?.all().orEmpty().groupBy { it.light }
         val now = System.currentTimeMillis() / 1000
         val marks = lights.map { position ->
-            val events = byLight[position].orEmpty()
+            val events = byLight[position].orEmpty() + sharedEvents?.near(position).orEmpty()
             val state = when {
                 events.isEmpty() -> MARK_NO_DATA
                 events.size >= ObservationCycleEstimator.MIN_EVENTS && learnedProgram(position, null, now) != null -> MARK_LEARNED
@@ -1064,10 +1066,11 @@ object GreenWaveController {
     }
 
     /** Worker: lights with at least one logged event (stop or pass). */
-    private fun lightsWithData(): Set<LatLng> = allEvents().mapTo(HashSet()) { it.light }
-
-    /** Worker: own and shared light events together. */
-    private fun allEvents(): List<LightEvent> = lightEvents?.all().orEmpty() + sharedEvents?.all().orEmpty()
+    /** Worker: of [positions], the lights with own or shared events. */
+    private fun lightsWithData(positions: Collection<LatLng>): Set<LatLng> {
+        val own = lightEvents?.all().orEmpty().mapTo(HashSet()) { it.light }
+        return positions.filterTo(HashSet()) { it in own || sharedEvents?.near(it).orEmpty().isNotEmpty() }
+    }
 
     /** Main thread: coloured dots on the map. */
     private fun showMarks(marks: List<Pair<LatLng, Int>>) {

@@ -15,29 +15,31 @@ import java.util.Locale
  *   `{"stored":n,"duplicates":m}`, 400 `{"error":"…"}` for invalid rows,
  *   413 when too large.
  * - `GET {base}/v1/events?bbox=minLat,minLon,maxLat,maxLon&since=epochSec`,
- *   box at most [MAX_BOX_DEG] per side; answer 200
- *   `{"v":1,"events":[row, …],"truncated":bool}`.
+ *   box at most 1° per side; answer 200
+ *   `{"v":1,"events":[row, …],"truncated":bool}`, newest first.
  *
  * Nothing identifies the rider: no account, no device id, no track; the
  * server keeps no IP and no access log. Called from [ShareWorker] only.
  */
 internal object ShareClient {
     const val MAX_PER_POST = 2_000
-    const val MAX_BOX_DEG = 1.0
     private const val USER_AGENT = "greenWave Maps/dev"
 
     data class Box(val minLat: Double, val minLon: Double, val maxLat: Double, val maxLon: Double)
 
-    /** Sends [events] in chunks; returns how many the server stored (duplicates excluded). Throws on any failure. */
+    /** The board refused the request itself (HTTP 4xx): sending the same again will not help. */
+    class Rejected(message: String) : Exception(message)
+
+    /**
+     * Sends one request of at most [MAX_PER_POST] events; returns how many the
+     * board stored (duplicates excluded). Throws [Rejected] on 4xx, other
+     * exceptions on network or server trouble.
+     */
     fun upload(base: String, events: List<LightEvent>): Int {
-        var stored = 0
-        for (chunk in events.chunked(MAX_PER_POST)) {
-            val rows = JSONArray().apply { chunk.forEach { put(LightEventStore.toRow(it)) } }
-            val body = JSONObject().put("v", 1).put("events", rows).toString()
-            val answer = request("$base/v1/events", "POST", body)
-            stored += answer.optInt("stored", 0)
-        }
-        return stored
+        require(events.size <= MAX_PER_POST) { "at most $MAX_PER_POST events per request" }
+        val rows = JSONArray().apply { events.forEach { put(LightEventStore.toRow(it)) } }
+        val body = JSONObject().put("v", 1).put("events", rows).toString()
+        return request("$base/v1/events", "POST", body).optInt("stored", 0)
     }
 
     /** Events in [box] since [sinceEpochSec]; malformed rows are skipped. Throws on any failure. */
@@ -63,6 +65,7 @@ internal object ShareClient {
             val code = connection.responseCode
             if (code != HttpURLConnection.HTTP_OK) {
                 val detail = connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty().take(200)
+                if (code in 400..499) throw Rejected("board HTTP $code: $detail")
                 error("board HTTP $code: $detail")
             }
             return JSONObject(connection.inputStream.bufferedReader().use { it.readText() })

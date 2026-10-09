@@ -3,6 +3,7 @@ package dev.greenwave.maps
 import android.content.Context
 import android.util.Log
 import dev.greenwave.shared.geo.LatLng
+import dev.greenwave.shared.sharing.SharedEvents
 import dev.greenwave.shared.tracking.LightEvent
 import org.json.JSONArray
 import org.json.JSONObject
@@ -47,6 +48,9 @@ internal class LightEventStore(
 
     /** Events at [light] (same OSM position). */
     fun at(light: LatLng): List<LightEvent> = load().filter { it.light == light }
+
+    /** Events at the light at [position] within [SharedEvents.MATCH_METERS] (others' positions differ in the last digits). */
+    fun near(position: LatLng): List<LightEvent> = SharedEvents.near(load(), position)
 
     private fun load(): MutableList<LightEvent> {
         if (watch && cache != null && file.lastModified() != loadedModified) cache = null

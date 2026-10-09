@@ -371,7 +371,7 @@ internal object GreenWaveDialogs {
                 "um Start und Ziel jeder Fahrt bleiben auf dem Gerät. Dafür lernt die App auch aus den Fahrten " +
                 "anderer.", small = true))
         val shareUrl = EditText(context).apply {
-            hint = "Server, z. B. https://host:port"
+            hint = "Server (https://…)"
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
             setText(settings.shareServerUrl)
             setSingleLine()
@@ -405,8 +405,11 @@ internal object GreenWaveDialogs {
                 settings.runsRed = red.isChecked
                 settings.autoExport = autoExport.isChecked
                 settings.shareEnabled = share.isChecked
+                // Nothing queued may leave the device once sharing is off or the rider runs red.
+                if (!share.isChecked || red.isChecked) Thread { ShareQueue.clear(context.applicationContext) }.start()
                 val url = shareUrl.text.toString().trim()
-                if (url.isEmpty() || url.startsWith("https://") || url.startsWith("http://")) settings.shareServerUrl = url
+                if (url.isEmpty() || url.startsWith("https://")) settings.shareServerUrl = url
+                else Toast.makeText(context, "Server-Adresse muss mit https:// beginnen, nicht gespeichert.", Toast.LENGTH_LONG).show()
             }
             .setNegativeButton("Abbrechen", null)
             .show()

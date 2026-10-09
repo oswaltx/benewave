@@ -26,9 +26,16 @@ import java.util.concurrent.TimeUnit
  * sharing and a server address is set.
  */
 internal class ShareWorker(context: Context, params: WorkerParameters) : Worker(context, params) {
-    override fun doWork(): Result {
+    override fun doWork(): Result = synchronized(RUN_LOCK) { exchange() }
+
+    /** One worker at a time (daily run and "Jetzt senden" may overlap), so the queue and the shared file stay consistent. */
+    private fun exchange(): Result {
         val context = applicationContext
         val settings = GreenWaveSettings(context)
+        if (settings.runsRed) {
+            ShareQueue.clear(context)
+            return Result.success()
+        }
         val base = settings.shareServerUrl.trim().trimEnd('/')
         if (!settings.shareEnabled || base.isEmpty()) return Result.success()
         val now = System.currentTimeMillis() / 1000
@@ -36,36 +43,58 @@ internal class ShareWorker(context: Context, params: WorkerParameters) : Worker(
         if (settings.shareNextAt == 0L) settings.shareNextAt = ShareSchedule.next(now, offset)
         val force = inputData.getBoolean(KEY_FORCE, false)
         if (!force && !ShareSchedule.due(settings.shareNextAt, now)) return Result.success()
-        return try {
-            val pending = ShareQueue.all(context)
-            if (pending.isNotEmpty()) {
-                val stored = ShareClient.upload(base, pending.shuffled())
-                ShareQueue.removeFirst(context, pending.size)
-                Log.i(TAG, "shared ${pending.size} light events, $stored new on the board")
-            }
-            fetch(context, base, settings, now)
+
+        val sent = runCatching { send(context, base, now) }
+            .onFailure { Log.w(TAG, "sending to the board failed, retrying later", it) }
+            .isSuccess
+        // Fetching does not depend on sending: a failed upload must not cut the rider off from others' data.
+        val fetched = runCatching { fetch(context, base, now) }
+            .onFailure { Log.w(TAG, "fetching from the board failed, retrying later", it) }
+            .isSuccess
+        if (sent && fetched) {
             settings.shareLastSent = now
             settings.shareNextAt = ShareSchedule.next(now, offset)
-            Result.success()
-        } catch (e: Exception) {
-            Log.w(TAG, "board exchange failed, retrying later", e)
-            if (runAttemptCount < MAX_ATTEMPTS) Result.retry() else Result.failure()
+            return Result.success()
+        }
+        return if (runAttemptCount < MAX_ATTEMPTS) Result.retry() else Result.failure()
+    }
+
+    /**
+     * Sends the queue in requests of [ShareClient.MAX_PER_POST]. Events the board
+     * would not take (too old, clock wrong) are dropped first; a request the board
+     * rejects (4xx) is dropped too, so one bad row never blocks the queue.
+     */
+    private fun send(context: Context, base: String, now: Long) {
+        val pending = ShareQueue.all(context)
+        if (pending.isEmpty()) return
+        val uploadable = SharedEvents.uploadable(pending, now)
+        ShareQueue.remove(context, pending - uploadable.toSet())
+        for (chunk in uploadable.shuffled().chunked(ShareClient.MAX_PER_POST)) {
+            try {
+                val stored = ShareClient.upload(base, chunk)
+                Log.i(TAG, "shared ${chunk.size} light events, $stored new on the board")
+            } catch (e: ShareClient.Rejected) {
+                Log.w(TAG, "board rejected ${chunk.size} light events, dropping them", e)
+            }
+            ShareQueue.remove(context, chunk)
         }
     }
 
-    private fun fetch(context: Context, base: String, settings: GreenWaveSettings, now: Long) {
+    private fun fetch(context: Context, base: String, now: Long) {
         val own = LightEventStore(context).all()
         val box = SharedEvents.region(own) ?: return
-        val since = maxOf(settings.shareLastFetch, now - SharedEvents.MAX_AGE_SEC)
+        // Always the whole window: others upload weekly and late, and merge removes what is known already.
+        val since = now - SharedEvents.MAX_AGE_SEC
         val downloaded = ShareClient.download(base, ShareClient.Box(box.minLat, box.minLon, box.maxLat, box.maxLon), since)
         val shared = LightEventStore(context, LightEventStore.SHARED_FILE)
         shared.replaceAll(SharedEvents.merge(shared.all(), downloaded, own, now))
-        settings.shareLastFetch = now
+        GreenWaveSettings(context).shareLastFetch = now
         Log.i(TAG, "fetched ${downloaded.size} shared light events")
     }
 
     companion object {
         private const val TAG = "GreenWave"
+        private val RUN_LOCK = Any()
         private const val KEY_FORCE = "force"
         private const val MAX_ATTEMPTS = 5
         private const val PERIODIC = "greenwave-share"

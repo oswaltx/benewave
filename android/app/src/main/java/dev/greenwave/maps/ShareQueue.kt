@@ -32,12 +32,23 @@ internal object ShareQueue {
 
     fun size(context: Context): Int = all(context).size
 
-    /** After a successful send of the first [count] events: drop exactly those (newer ones may have arrived). */
-    fun removeFirst(context: Context, count: Int) {
+    /** After a send: drop exactly [events] (one occurrence each); events queued meanwhile stay. */
+    fun remove(context: Context, events: Collection<LightEvent>) {
+        if (events.isEmpty()) return
         synchronized(lock) {
-            val list = read(context)
-            write(context, list.drop(count.coerceAtMost(list.size)))
+            val pending = events.groupingBy { it }.eachCount().toMutableMap()
+            val kept = read(context).filter { e ->
+                val n = pending[e] ?: 0
+                if (n > 0) pending[e] = n - 1
+                n == 0
+            }
+            write(context, kept)
         }
+    }
+
+    /** Sharing switched off or the rider runs red: nothing queued may leave the device any more. */
+    fun clear(context: Context) {
+        synchronized(lock) { file(context).delete() }
     }
 
     private fun file(context: Context) = File(context.applicationContext.filesDir, FILE)
