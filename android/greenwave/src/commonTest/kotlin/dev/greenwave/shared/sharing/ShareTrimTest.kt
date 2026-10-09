@@ -101,4 +101,43 @@ class ShareTrimTest {
         trim.add(listOf(ev(north(1_400.0), 60), ev(north(2_500.0), 360)))
         assertEquals(listOf(north(2_500.0)), trim.end().map { it.light })
     }
+
+    @Test
+    fun aSingleGpsOutlierDoesNotHideAPause() {
+        // Stay 8 minutes at a café 3 km out; one fix in the middle jumps 300 m away and back,
+        // which splits the stay into two parts shorter than the 5-minute pause.
+        val trim = ShareTrim(Random(6))
+        var t = trim.ride(0.0, 3_000.0, 0)
+        repeat(96) {
+            t += 5
+            trim.onFix(if (it == 48) north(3_300.0) else north(3_000.0 + (it % 3) * 20.0), t)
+        }
+        t = trim.ride(3_000.0, 6_000.0, t + 5)
+        trim.add(listOf(ev(north(1_500.0), 300), ev(north(2_700.0), 540), ev(north(4_500.0), 1_500)))
+        assertEquals(listOf(north(1_500.0), north(4_500.0)), trim.end().map { it.light })
+    }
+
+    @Test
+    fun coldStartFixFarOffStillCutsAroundTheRealStart() {
+        // The first fix lies 2 km off; 30 s later GPS settles at home and the rider sets off slowly (2 m/s).
+        val trim = ShareTrim(Random(7))
+        trim.onFix(north(-2_000.0), 0)
+        var t = 30L
+        var m = 0.0
+        while (m <= 3_000.0) { trim.onFix(north(m), t); t += 5; m += 10.0 }
+        // 380 m from home is passed after 3 min, outside the first 2 minutes; 1.5 km is far from all ends.
+        trim.add(listOf(ev(north(380.0), 220), ev(north(1_500.0), 780)))
+        assertEquals(listOf(north(1_500.0)), trim.end().map { it.light })
+    }
+
+    @Test
+    fun fastRidingIsNoColdStartJump() {
+        // 12 m/s downhill right after the start must not add cuts along the way.
+        val trim = ShareTrim(Random(8))
+        var t = 0L
+        var m = 0.0
+        while (m <= 5_000.0) { trim.onFix(north(m), t); t += 5; m += 60.0 }
+        trim.add(listOf(ev(north(1_800.0), 150)))
+        assertEquals(listOf(north(1_800.0)), trim.end().map { it.light })
+    }
 }

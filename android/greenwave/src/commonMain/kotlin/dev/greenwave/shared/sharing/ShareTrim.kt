@@ -22,8 +22,13 @@ import kotlin.random.Random
  *
  * Around a begin or end the first and last [edgeSec] of events are dropped as
  * well: after a cold start the first fix can lie hundreds of meters from where
- * the rider set off. A restart that loses the recording loses its events too
- * (they are only queued at the end), so nothing of it is shared.
+ * the rider set off. If GPS then jumps faster than [jumpSpeedMps] within those
+ * first [edgeSec], the fix after the jump counts as a begin too, so the cut also
+ * lies around the real start. A restart that loses the recording loses its
+ * events too (they are only queued at the end), so nothing of it is shared.
+ *
+ * A single fix farther than [pauseMeters] from a stay (a GPS outlier) does not
+ * end it; leaving takes two fixes in a row outside.
  */
 class ShareTrim(
     private val random: Random = Random.Default,
@@ -32,6 +37,7 @@ class ShareTrim(
     private val pauseSec: Long = DEFAULT_PAUSE_SEC,
     private val pauseMeters: Double = DEFAULT_PAUSE_METERS,
     private val edgeSec: Long = DEFAULT_EDGE_SEC,
+    private val jumpSpeedMps: Double = DEFAULT_JUMP_SPEED_MPS,
 ) {
     init {
         require(minMeters > 0 && maxMeters >= minMeters) { "invalid radius $minMeters..$maxMeters" }
@@ -46,6 +52,10 @@ class ShareTrim(
     /** Where the rider has stayed (within [pauseMeters]) since when, and whether that already counted as a pause. */
     private var anchor: Fix? = null
     private var anchorCut = false
+    /** A first fix outside the stay; the stay ends only if the next fix is outside too. */
+    private var outside = false
+    /** Until when fixes still settle after a begin (cold start). */
+    private var settleUntil = Long.MIN_VALUE
     private val events = mutableListOf<LightEvent>()
 
     /** The radius of the next begin, end or pause place. */
@@ -54,6 +64,7 @@ class ShareTrim(
     private fun begin(fix: Fix) {
         cuts.add(Cut(fix.position, radius()))
         quiet.add(fix.epochSec..fix.epochSec + edgeSec)
+        settleUntil = fix.epochSec + edgeSec
     }
 
     private fun finish(fix: Fix) {
@@ -70,16 +81,36 @@ class ShareTrim(
         } else if (epochSec - previous.epochSec >= pauseSec) {
             finish(previous)
             begin(fix)
+        } else if (epochSec <= settleUntil && isJump(previous, fix)) {
+            // The cold-start fix was off; the settled one marks the real start.
+            cuts.add(Cut(position, radius()))
         }
         val a = anchor
-        if (a == null || distanceMeters(a.position, position) > pauseMeters) {
+        if (a == null) {
             anchor = fix
             anchorCut = false
-        } else if (!anchorCut && epochSec - a.epochSec >= pauseSec) {
-            cuts.add(Cut(a.position, radius()))
-            anchorCut = true
+        } else if (distanceMeters(a.position, position) > pauseMeters) {
+            if (outside) {
+                anchor = fix
+                anchorCut = false
+                outside = false
+            } else {
+                outside = true
+            }
+        } else {
+            outside = false
+            if (!anchorCut && epochSec - a.epochSec >= pauseSec) {
+                cuts.add(Cut(a.position, radius()))
+                anchorCut = true
+            }
         }
         last = fix
+    }
+
+    private fun isJump(from: Fix, to: Fix): Boolean {
+        val meters = distanceMeters(from.position, to.position)
+        val sec = to.epochSec - from.epochSec
+        return if (sec <= 0) meters > pauseMeters else meters / sec > jumpSpeedMps
     }
 
     /** Events stored for own learning during this ride. */
@@ -101,6 +132,8 @@ class ShareTrim(
         last = null
         anchor = null
         anchorCut = false
+        outside = false
+        settleUntil = Long.MIN_VALUE
         return shareable
     }
 
@@ -112,5 +145,7 @@ class ShareTrim(
         // Indoors GPS wanders tens of meters; a rider covers this in seconds.
         const val DEFAULT_PAUSE_METERS = 100.0
         const val DEFAULT_EDGE_SEC = 120L
+        /** Faster than any bicycle (54 km/h); a jump this fast after a begin is GPS settling. */
+        const val DEFAULT_JUMP_SPEED_MPS = 15.0
     }
 }
