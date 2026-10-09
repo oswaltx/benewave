@@ -30,7 +30,7 @@ object SharedEvents {
     /** Only events younger than this leave the device, so the board (which takes 60 days) never rejects them. */
     const val MAX_UPLOAD_AGE_SEC = 55L * 86_400
 
-    /** Events stamped further in the future (wrong clock) stay on the device. */
+    /** Events stamped further in the future (wrong clock) are not sent (and dropped from the queue). */
     const val MAX_FUTURE_SEC = 30L * 60
 
     /**
@@ -108,10 +108,22 @@ object SharedEvents {
      * than one device: events of a light count only if at least [MIN_SOURCES]
      * sources reported it (lights matched within [MATCH_METERS]), and each source
      * contributes at most its [MAX_PER_SOURCE_AND_LIGHT] newest events there.
-     * Sources are counted within one scope only: a light at a tile edge must not
-     * count one device twice because both tiles named it differently.
+     * The rider's [own] events (they come back from the board) are no source.
+     * Sources are counted within one scope only (the board names them per tile
+     * download and ~100 m cell): a light at an edge must not count one device
+     * twice because it was named differently on both sides.
      */
-    fun credible(downloaded: List<SourcedEvent>): List<LightEvent> {
+    fun credible(downloaded: List<SourcedEvent>, own: List<LightEvent>): List<LightEvent> {
+        // The rider's own events come back from the board; they must not count as a source, or one forger would be enough.
+        val ownByMoment = own.groupBy { it.epochSec to it.kind }
+        val others = downloaded.filter { !isOwn(it.event, ownByMoment) }
+        return credibleOf(others)
+    }
+
+    private fun isOwn(e: LightEvent, ownByMoment: Map<Pair<Long, LightEvent.Kind>, List<LightEvent>>) =
+        ownByMoment[e.epochSec to e.kind].orEmpty().any { distanceMeters(it.light, e.light) <= MATCH_METERS }
+
+    private fun credibleOf(downloaded: List<SourcedEvent>): List<LightEvent> {
         // Cluster lights within MATCH_METERS via a grid of ~ MATCH_METERS cells and their neighbours.
         val cell = MATCH_METERS / 111_320.0
         fun cellOf(p: LatLng) = floor(p.latitude / cell).toLong() to floor(p.longitude / cell).toLong()
@@ -154,13 +166,27 @@ object SharedEvents {
      * order, an event is dropped if it is further than [SPEED_CHECK_METERS] from
      * a kept one of the last [SPEED_CHECK_WINDOW_SEC] (or the last kept one) and
      * reached faster than [MAX_UPLOAD_SPEED_MPS] (GPS jump, clock trouble). The
-     * board rejects uploads that are not plausible (with more slack, so any
-     * subset of what this keeps passes), and one bad event must not cost the
-     * whole week.
+     * board rejects uploads that are not plausible (with more slack, so in
+     * practice any chunk of what this keeps passes), and one bad event must not
+     * cost the whole week. A single outlier (too fast from both neighbours,
+     * which fit each other) goes first, so it cannot knock out the real events
+     * after it.
      */
     fun plausible(events: List<LightEvent>): List<LightEvent> {
+        val sorted = events.sortedBy { it.epochSec }
+        val withoutOutliers = sorted.filterIndexed { i, e ->
+            val before = sorted.getOrNull(i - 1)
+            val after = sorted.getOrNull(i + 1)
+            when {
+                before != null && after != null -> fits(before, e) || fits(e, after) || !fits(before, after)
+                // At the ends: an outlier if it does not fit its neighbour while the neighbour fits the next one.
+                after != null -> fits(e, after) || sorted.getOrNull(i + 2)?.let { !fits(after, it) } ?: true
+                before != null -> fits(before, e) || sorted.getOrNull(i - 2)?.let { !fits(it, before) } ?: true
+                else -> true
+            }
+        }
         val kept = ArrayList<LightEvent>()
-        for (e in events.sortedBy { it.epochSec }) {
+        for (e in withoutOutliers) {
             val recent = kept.asReversed().asSequence().takeWhile { e.epochSec - it.epochSec <= SPEED_CHECK_WINDOW_SEC }
             if ((recent + listOfNotNull(kept.lastOrNull())).all { k -> fits(k, e) }) kept.add(e)
         }
@@ -183,7 +209,7 @@ object SharedEvents {
         return (existing + downloaded)
             .filter { e ->
                 nowEpochSec - e.epochSec <= MAX_AGE_SEC &&
-                    ownByMoment[e.epochSec to e.kind].orEmpty().none { distanceMeters(it.light, e.light) <= MATCH_METERS } &&
+                    !isOwn(e, ownByMoment) &&
                     seen.add(key(e))
             }
             .sortedBy { it.epochSec }

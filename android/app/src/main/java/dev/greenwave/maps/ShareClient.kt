@@ -1,5 +1,6 @@
 package dev.greenwave.maps
 
+import android.util.Log
 import dev.greenwave.shared.sharing.SourcedEvent
 import dev.greenwave.shared.sharing.Tile
 import dev.greenwave.shared.tracking.LightEvent
@@ -11,16 +12,19 @@ import java.net.URL
 /**
  * The shared board ("Pinnwand", a separate server):
  *
- * - `POST {base}/v1/device`: answer 200 `{"device":"id.sig"}`, a random token
- *   the board signed; 429 when too many devices registered lately.
+ * - `POST {base}/v1/device`: answer 200 `{"device":"id-issued.sig"}`, a random
+ *   token with its issue time, signed by the board; 429 when too many devices
+ *   registered lately. The board shows a token's events only once it is a
+ *   week old.
  * - `POST {base}/v1/events`, body `{"v":1,"device":"id.sig","events":[row, …]}`
  *   with at most [MAX_PER_POST] rows in [LightEventStore]'s row format; answer
  *   200 `{"stored":n,"duplicates":m}`, 400 `{"error":"…"}` for invalid or
  *   implausible rows, 401 for an unknown token, 413 when too large, 429 over
  *   the limit per device.
  * - `GET {base}/v1/events?tile=latIdx,lonIdx&since=epochSec`, one fixed tile of
- *   [SharedEvents.TILE_DEG]; answer 200 `{"v":1,"events":[row + [src], …],"truncated":bool}`,
- *   newest first; src names the source (one device in one week), renamed per answer.
+ *   [SharedEvents.TILE_DEG]; answer 200 `{"v":1,"events":[row + [src, cell], …],"truncated":bool}`,
+ *   newest first; src names the source (one device), renamed per answer and
+ *   ~100 m cell, so it counts devices at a junction without linking ways.
  *
  * Nothing identifies the rider: no account, no track; the token is random and
  * forgotten when sharing is switched off; the server keeps no IP and no access
@@ -39,7 +43,7 @@ internal object ShareClient {
     /** A new device token from the board. Throws on any failure. */
     fun register(base: String): String {
         val token = request("$base/v1/device", "POST", "").getString("device")
-        require(Regex("[0-9a-f]{32}\\.[0-9a-f]{32}").matches(token)) { "unexpected device token" }
+        require(Regex("[0-9a-f]{32}-[0-9]{1,12}\\.[0-9a-f]{32}").matches(token)) { "unexpected device token" }
         return token
     }
 
@@ -63,10 +67,11 @@ internal object ShareClient {
     fun download(base: String, tile: Tile, sinceEpochSec: Long): List<SourcedEvent> {
         val answer = request("$base/v1/events?tile=${tile.latIdx},${tile.lonIdx}&since=$sinceEpochSec", "GET", null)
         val rows = answer.getJSONArray("events")
+        if (answer.optBoolean("truncated")) Log.w("GreenWave", "board answer for tile $tile truncated, older events missing")
         return (0 until rows.length()).mapNotNull { i ->
             runCatching {
                 val row = rows.getJSONArray(i)
-                SourcedEvent(LightEventStore.fromRow(row), source = row.getString(7), scope = "${tile.latIdx},${tile.lonIdx}")
+                SourcedEvent(LightEventStore.fromRow(row), source = row.getString(7), scope = "${tile.latIdx},${tile.lonIdx}:${row.getString(8)}")
             }.getOrNull()
         }
     }

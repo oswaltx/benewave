@@ -74,4 +74,58 @@ object ShareSchedule {
 
     /** Whether a send planned for [plannedEpochSec] is due ([plannedEpochSec] 0 = never planned, then plan first). */
     fun due(plannedEpochSec: Long, nowEpochSec: Long): Boolean = plannedEpochSec in 1..nowEpochSec
+
+    /** What the worker knows: planned moments (0 = not planned yet) and when it last sent or fetched (0 = never). */
+    data class State(val sendAt: Long, val fetchAt: Long, val lastSent: Long, val lastFetch: Long)
+
+    /** What the worker does now, and the plan to keep. */
+    data class Decision(val send: Boolean, val fetch: Boolean, val sendAt: Long, val fetchAt: Long)
+
+    /**
+     * The worker's decision at [nowEpochSec]. Acts only on unmetered networks
+     * inside the window; a moment due outside the window moves to the next one.
+     * Sending and fetching never happen within [MIN_GAP_SEC] of each other, also
+     * when one of them ran late, so the board cannot tie a download area to an
+     * upload. [force] ("Jetzt senden") sends at once on any network and moves
+     * a fetch that would come too close.
+     */
+    fun decide(
+        state: State,
+        nowEpochSec: Long,
+        utcOffsetSec: Int,
+        force: Boolean,
+        unmetered: Boolean,
+        random: Random = Random.Default,
+    ): Decision {
+        val now = nowEpochSec
+        var sendAt = if (state.sendAt != 0L) state.sendAt else next(now, utcOffsetSec, random)
+        var fetchAt = if (state.fetchAt != 0L) state.fetchAt else nextApart(now, utcOffsetSec, sendAt, random)
+        fun close(a: Long, b: Long) = b != 0L && abs(a - b) < MIN_GAP_SEC
+        if (force) {
+            if (close(fetchAt, now) || fetchAt <= now) fetchAt = postpone(now, utcOffsetSec, random, apartFrom = now)
+            return Decision(send = true, fetch = false, sendAt = sendAt, fetchAt = fetchAt)
+        }
+        var send = due(sendAt, now)
+        var fetch = due(fetchAt, now)
+        if (!send && !fetch || !unmetered) return Decision(false, false, sendAt, fetchAt)
+        if (!inWindow(now, utcOffsetSec)) {
+            if (send) sendAt = postpone(now, utcOffsetSec, random, apartFrom = fetchAt)
+            if (fetch) fetchAt = postpone(now, utcOffsetSec, random, apartFrom = sendAt)
+            return Decision(false, false, sendAt, fetchAt)
+        }
+        if (send && close(now, state.lastFetch)) {
+            sendAt = postpone(now, utcOffsetSec, random, apartFrom = state.lastFetch)
+            send = false
+        }
+        if (fetch && close(now, state.lastSent)) {
+            fetchAt = postpone(now, utcOffsetSec, random, apartFrom = state.lastSent)
+            fetch = false
+        }
+        // Both due (phone was off): send now, fetch later.
+        if (send && fetch) {
+            fetchAt = postpone(now, utcOffsetSec, random, apartFrom = now)
+            fetch = false
+        }
+        return Decision(send, fetch, sendAt, fetchAt)
+    }
 }

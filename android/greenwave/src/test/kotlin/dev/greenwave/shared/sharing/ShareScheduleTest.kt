@@ -96,4 +96,80 @@ class ShareScheduleTest {
             assertTrue(local(fetch).hour in 8..20)
         }
     }
+
+    private val gap = ShareSchedule.MIN_GAP_SEC
+
+    private fun decide(state: ShareSchedule.State, now: Long, force: Boolean = false, unmetered: Boolean = true, seed: Int = 1) =
+        ShareSchedule.decide(state, now, cest, force, unmetered, Random(seed))
+
+    @Test
+    fun decideActsOnlyWhenDueOnWlanInTheWindow() {
+        val sendAt = at(14, 10)
+        val fetchAt = at(16, 15)
+        val state = ShareSchedule.State(sendAt, fetchAt, 0, 0)
+        assertEquals(ShareSchedule.Decision(false, false, sendAt, fetchAt), decide(state, at(13, 12)))
+        assertEquals(ShareSchedule.Decision(false, false, sendAt, fetchAt), decide(state, at(14, 11), unmetered = false))
+        assertEquals(ShareSchedule.Decision(true, false, sendAt, fetchAt), decide(state, at(14, 11)))
+    }
+
+    @Test
+    fun decideMovesAMomentMissedAtNightToTheNextWindow() {
+        val state = ShareSchedule.State(at(14, 10), at(16, 15), 0, 0)
+        repeat(50) { seed ->
+            val d = decide(state, at(14, 22, 30), seed = seed)
+            assertFalse(d.send || d.fetch)
+            val moved = local(d.sendAt)
+            assertEquals(15, moved.dayOfMonth, "$moved")
+            assertTrue(moved.hour in 8..20)
+        }
+    }
+
+    @Test
+    fun decideKeepsSendAndFetchApartAlsoWhenOneRanLate() {
+        // The send was due Wednesday but ran only Thursday 09:00; the fetch planned Thursday 15:00 must wait.
+        val lastSent = at(15, 9)
+        repeat(50) { seed ->
+            val d = decide(ShareSchedule.State(at(21, 10), at(15, 14), lastSent, 0), at(15, 15), seed = seed)
+            assertFalse(d.fetch)
+            assertTrue(d.fetchAt - lastSent >= gap, "${local(d.fetchAt)}")
+            assertTrue(local(d.fetchAt).hour in 8..20)
+        }
+        // And the other way round.
+        val lastFetch = at(15, 9)
+        val d = decide(ShareSchedule.State(at(15, 14), at(22, 10), 0, lastFetch), at(15, 15))
+        assertFalse(d.send)
+        assertTrue(d.sendAt - lastFetch >= gap)
+    }
+
+    @Test
+    fun decideNeverSendsAndFetchesInOneGo() {
+        repeat(50) { seed ->
+            val d = decide(ShareSchedule.State(at(12, 10), at(13, 10), 0, 0), at(15, 11), seed = seed)
+            assertTrue(d.send)
+            assertFalse(d.fetch)
+            assertTrue(d.fetchAt - at(15, 11) >= gap)
+        }
+    }
+
+    @Test
+    fun forceSendsOnlyAndMovesAFetchThatWouldComeTooClose() {
+        repeat(50) { seed ->
+            val now = at(15, 23)
+            val d = decide(ShareSchedule.State(at(20, 10), at(16, 9), 0, 0), now, force = true, unmetered = false, seed = seed)
+            assertTrue(d.send)
+            assertFalse(d.fetch)
+            assertTrue(d.fetchAt - now >= gap, "${local(d.fetchAt)}")
+        }
+        val far = at(18, 12)
+        assertEquals(far, decide(ShareSchedule.State(at(20, 10), far, 0, 0), at(15, 12), force = true).fetchAt)
+    }
+
+    @Test
+    fun decidePlansBothApartOnFirstRun() {
+        repeat(50) { seed ->
+            val d = decide(ShareSchedule.State(0, 0, 0, 0), at(9, 12), seed = seed)
+            assertFalse(d.send || d.fetch)
+            assertTrue(kotlin.math.abs(d.sendAt - d.fetchAt) >= gap)
+        }
+    }
 }

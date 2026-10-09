@@ -41,22 +41,32 @@ class SharedEventsTest {
         val light = LatLng(50.9361375, 6.9865199)
         val sameLightOtherMap = LatLng(50.9361390, 6.9865210) // < 3 m away
         val forged = (0 until 10).map { SourcedEvent(ev(koeln, it * 100L), "a") }
-        assertEquals(emptyList(), SharedEvents.credible(forged), "six or more events from one source alone never count")
+        assertEquals(emptyList(), SharedEvents.credible(forged, own = emptyList()), "six or more events from one source alone never count")
         val two = listOf(SourcedEvent(ev(light, 10), "a"), SourcedEvent(ev(sameLightOtherMap, 20), "b"))
-        assertEquals(two.map { it.event }, SharedEvents.credible(two))
+        assertEquals(two.map { it.event }, SharedEvents.credible(two, own = emptyList()))
         // A second source at another light does not help.
         val elsewhere = listOf(SourcedEvent(ev(light, 10), "a"), SourcedEvent(ev(LatLng(50.9363, 6.9865), 20), "b"))
-        assertEquals(emptyList(), SharedEvents.credible(elsewhere))
+        assertEquals(emptyList(), SharedEvents.credible(elsewhere, own = emptyList()))
         // The same name in two tiles' answers is not two sources, nor are two names across tiles.
         val acrossTiles = listOf(SourcedEvent(ev(light, 10), "a", "t1"), SourcedEvent(ev(sameLightOtherMap, 20), "b", "t2"))
-        assertEquals(emptyList(), SharedEvents.credible(acrossTiles))
+        assertEquals(emptyList(), SharedEvents.credible(acrossTiles, own = emptyList()))
+    }
+
+    @Test
+    fun ownEventsComingBackAreNoSource() {
+        val mine = ev(koeln, 10)
+        val forged = SourcedEvent(ev(koeln, 20), "x", "c")
+        // The board returns the rider's own event under some name; with one forger that would look like two sources.
+        assertEquals(emptyList(), SharedEvents.credible(listOf(SourcedEvent(mine, "y", "c"), forged), own = listOf(mine)))
+        val second = SourcedEvent(ev(koeln, 30), "z", "c")
+        assertEquals(listOf(forged.event, second.event), SharedEvents.credible(listOf(SourcedEvent(mine, "y", "c"), forged, second), own = listOf(mine)))
     }
 
     @Test
     fun credibleCapsWhatOneSourceAddsToALight() {
         val flood = (0 until 100).map { SourcedEvent(ev(koeln, it.toLong()), "a") }
         val other = SourcedEvent(ev(koeln, 1_000), "b")
-        val kept = SharedEvents.credible(flood + other)
+        val kept = SharedEvents.credible(flood + other, own = emptyList())
         assertEquals(SharedEvents.MAX_PER_SOURCE_AND_LIGHT + 1, kept.size)
         assertTrue(kept.containsAll((70 until 100).map { ev(koeln, it.toLong()) }), "the newest of each source")
     }
@@ -69,6 +79,17 @@ class SharedEventsTest {
         val sameJunction = ev(LatLng(50.93005, 6.96), 1_000)
         val later = ev(LatLng(50.948, 6.96), 1_400) // the far light 400 s later: fine
         assertEquals(listOf(a, sameJunction, b, later), SharedEvents.plausible(listOf(later, jump, b, a, sameJunction)))
+    }
+
+    @Test
+    fun anOutlierFirstDoesNotCostTheRealEventsAfterIt() {
+        val glitch = ev(LatLng(50.99, 6.96), 990)  // 6.7 km away 10 s before
+        val real = (0 until 5).map { ev(LatLng(50.93 + it * 0.001, 6.96), 1_000L + it * 30) }
+        assertEquals(real, SharedEvents.plausible(real + glitch))
+        val glitchLast = ev(LatLng(50.99, 6.96), 1_130)
+        assertEquals(real, SharedEvents.plausible(real + glitchLast))
+        val glitchMiddle = ev(LatLng(50.99, 6.96), 1_045)
+        assertEquals(real, SharedEvents.plausible(real + glitchMiddle))
     }
 
     @Test

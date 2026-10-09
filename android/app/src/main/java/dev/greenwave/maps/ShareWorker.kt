@@ -17,6 +17,7 @@ import androidx.work.workDataOf
 import dev.greenwave.shared.sharing.ShareSchedule
 import dev.greenwave.shared.sharing.SharedEvents
 import java.util.TimeZone
+import kotlin.random.Random
 import java.util.concurrent.TimeUnit
 
 /**
@@ -31,8 +32,9 @@ import java.util.concurrent.TimeUnit
  *
  * Checks hourly on unmetered networks and acts only when a moment is due, the
  * local time is inside the sending window (a moment missed at night moves to
- * the next window) and the network is still unmetered when it runs. "Jetzt
- * senden" in the menu does both at once on any network. Off unless the rider
+ * the next window) and the network is still unmetered when it runs; the
+ * decision is [ShareSchedule.decide]. "Jetzt senden" in the menu sends at once
+ * on any network (the fetch stays at its own moment). Off unless the rider
  * enabled sharing and a server address is set.
  */
 internal class ShareWorker(context: Context, params: WorkerParameters) : Worker(context, params) {
@@ -51,30 +53,15 @@ internal class ShareWorker(context: Context, params: WorkerParameters) : Worker(
         if (!settings.shareEnabled || !base.startsWith("https://")) return Result.success()
         val now = System.currentTimeMillis() / 1000
         val offset = TimeZone.getDefault().getOffset(now * 1000) / 1000
-        if (settings.shareNextAt == 0L) settings.shareNextAt = ShareSchedule.next(now, offset)
-        if (settings.shareFetchAt == 0L) settings.shareFetchAt = ShareSchedule.nextApart(now, offset, settings.shareNextAt)
         val force = inputData.getBoolean(KEY_FORCE, false)
-
-        var sendDue = force || ShareSchedule.due(settings.shareNextAt, now)
-        var fetchDue = force || ShareSchedule.due(settings.shareFetchAt, now)
-        if (!sendDue && !fetchDue) return Result.success()
-        if (!force) {
-            // The constraint holds when the run starts; a metered hotspot that calls itself WLAN or a switch since must not send.
-            if (!unmetered(context)) return Result.success()
-            if (!ShareSchedule.inWindow(now, offset)) {
-                if (sendDue) settings.shareNextAt = ShareSchedule.postpone(now, offset, apartFrom = settings.shareFetchAt)
-                if (fetchDue) settings.shareFetchAt = ShareSchedule.postpone(now, offset, apartFrom = settings.shareNextAt)
-                return Result.success()
-            }
-            // Both due (phone was off): send now, fetch later, never both in one go.
-            if (sendDue && fetchDue) {
-                settings.shareFetchAt = ShareSchedule.postpone(now, offset, apartFrom = now)
-                fetchDue = false
-            }
-        }
+        val state = ShareSchedule.State(settings.shareNextAt, settings.shareFetchAt, settings.shareLastSent, settings.shareLastFetch)
+        // Checked when it runs, not only by the constraint: a metered hotspot that looks like WLAN, or a switch since, must not send.
+        val decision = ShareSchedule.decide(state, now, offset, force, unmetered = force || unmetered(context))
+        settings.shareNextAt = decision.sendAt
+        settings.shareFetchAt = decision.fetchAt
 
         var failed = false
-        if (sendDue) {
+        if (decision.send) {
             runCatching { send(context, settings, base, now) }
                 .onSuccess {
                     settings.shareLastSent = now
@@ -83,7 +70,7 @@ internal class ShareWorker(context: Context, params: WorkerParameters) : Worker(
                 .onFailure { failed = true; Log.w(TAG, "sending to the board failed, retrying later", it) }
         }
         // Fetching does not depend on sending: a failed upload must not cut the rider off from others' data.
-        if (fetchDue) {
+        if (decision.fetch) {
             runCatching { fetch(context, base, now) }
                 .onSuccess {
                     settings.shareLastFetch = now
@@ -139,8 +126,12 @@ internal class ShareWorker(context: Context, params: WorkerParameters) : Worker(
         val tiles = SharedEvents.tiles(own)
         if (tiles.isEmpty()) return
         val since = now - SharedEvents.MAX_AGE_SEC
-        val downloaded = tiles.flatMap { ShareClient.download(base, it, since) }
-        val credible = SharedEvents.credible(downloaded)
+        // Random order with pauses: the first request must not point at the tile the rider was in last.
+        val downloaded = tiles.shuffled().flatMapIndexed { i, tile ->
+            if (i > 0) Thread.sleep(Random.nextLong(2_000, 15_000))
+            ShareClient.download(base, tile, since)
+        }
+        val credible = SharedEvents.credible(downloaded, own)
         val shared = LightEventStore(context, LightEventStore.SHARED_FILE)
         val elsewhere = shared.all().filter { SharedEvents.tileOf(it.light) !in tiles }
         shared.replaceAll(SharedEvents.merge(elsewhere, credible, own, now))
@@ -165,7 +156,7 @@ internal class ShareWorker(context: Context, params: WorkerParameters) : Worker(
                 .enqueueUniquePeriodicWork(PERIODIC, ExistingPeriodicWorkPolicy.UPDATE, request)
         }
 
-        /** Send and fetch now, on any network (menu "Jetzt senden"). */
+        /** Send now, on any network (menu "Jetzt senden"); the fetch keeps its own moment. */
         fun sendNow(context: Context) {
             val request = OneTimeWorkRequestBuilder<ShareWorker>()
                 .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
