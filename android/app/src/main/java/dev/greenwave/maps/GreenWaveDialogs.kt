@@ -15,6 +15,7 @@ import android.widget.Toast
 import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.FileProvider
 import app.organicmaps.BuildConfig
+import app.organicmaps.sdk.bookmarks.data.BookmarkManager
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import dev.greenwave.shared.algorithm.SpeedRangeKmh
 import dev.greenwave.shared.geo.LatLng
@@ -199,8 +200,18 @@ internal object GreenWaveDialogs {
             .show()
     }
 
-    /** Hands the track as GPX to CoMaps' own import, which draws it and keeps it under "Lesezeichen und Tracks". */
+    /**
+     * Hands the track as GPX to CoMaps' own import, which draws it and keeps it under "Lesezeichen und Tracks".
+     * A ride imported before is shown again instead of being imported a second time.
+     */
     private fun showOnMap(activity: Activity, r: RideSummary) {
+        val name = RideHistory.trackName(r)
+        val existing = BookmarkManager.INSTANCE.categories.firstOrNull { it.name == name }
+        if (existing != null) {
+            BookmarkManager.INSTANCE.setVisibility(existing.id, true)
+            BookmarkManager.INSTANCE.showBookmarkCategoryOnMap(existing.id)
+            return
+        }
         val gpx = RideHistory.toGpx(activity, r)
         val uri = FileProvider.getUriForFile(activity, BuildConfig.FILE_PROVIDER_AUTHORITY, gpx)
         val intent = Intent(Intent.ACTION_VIEW)

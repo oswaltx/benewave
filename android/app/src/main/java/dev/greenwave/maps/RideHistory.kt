@@ -80,7 +80,7 @@ internal object RideHistory {
         out.bufferedWriter().use { w ->
             w.write("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
             w.write("<gpx version=\"1.1\" creator=\"greenWave Maps\" xmlns=\"http://www.topografix.com/GPX/1/1\">\n")
-            w.write("<trk><name>greenWave ${title(summary)}</name><trkseg>\n")
+            w.write("<trk><name>${trackName(summary)}</name><trkseg>\n")
             for (fix in read(summary.track)) {
                 w.write(
                     String.format(
@@ -93,6 +93,9 @@ internal object RideHistory {
         }
         return out
     }
+
+    /** Name of the track (and of the category CoMaps' import creates for it). */
+    fun trackName(summary: RideSummary): String = "greenWave ${title(summary)}"
 
     fun title(summary: RideSummary): String =
         SimpleDateFormat("EE dd.MM. HH:mm", Locale.GERMAN).format(Date(summary.startEpochSec * 1000))
