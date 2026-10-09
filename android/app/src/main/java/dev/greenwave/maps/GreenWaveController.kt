@@ -571,7 +571,7 @@ object GreenWaveController {
      */
     private fun shouldLearn(update: LocationUpdate): Boolean {
         lastPosition = update.position
-        shareTrim.onFix(update.position)
+        shareTrim.onFix(update.position, update.epochSec)
         recentFixes.addLast(update)
         while (recentFixes.isNotEmpty() && update.epochSec - recentFixes.first().epochSec > RECENT_FIXES_SEC) {
             recentFixes.removeFirst()
