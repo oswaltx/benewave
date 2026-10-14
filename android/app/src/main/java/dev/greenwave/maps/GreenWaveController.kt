@@ -15,6 +15,7 @@ import app.organicmaps.sdk.routing.RoutingController
 import app.organicmaps.sdk.routing.RoutingInfo
 import dev.greenwave.shared.algorithm.SpeedOptions
 import dev.greenwave.shared.algorithm.SpeedRangeKmh
+import dev.greenwave.shared.calibration.Calibration
 import dev.greenwave.shared.data.RandomTrafficTimingGenerator
 import dev.greenwave.shared.geo.LatLng
 import dev.greenwave.shared.guidance.RouteAdvice
@@ -137,6 +138,8 @@ object GreenWaveController {
     private var shareTrim = ShareTrim()
     /** Worker-only: events other riders shared (see [ShareWorker]), learned from like own ones. */
     private var sharedEvents: LightEventStore? = null
+    /** Worker-only: the rider's manual calibrations (Nerd-Modus), learned from, never shared. */
+    private var calibrations: CalibrationStore? = null
     private var learning = true
     private var lastPosition: LatLng? = null
     /** Worker-only: the last minutes of fixes, for map matching around a light (see [matchEvents]). */
@@ -148,6 +151,8 @@ object GreenWaveController {
     /** Worker-only: holds stops and passes back until the rider's turn at the light is known. */
     private val movements = MovementResolver()
     private var lightPositions: List<LatLng> = emptyList()
+    /** Worker-only: the route revision [lightPositions] belong to, -1 while none or loading. */
+    private var lightsRevision = -1
     private var lightsPath: List<LatLng> = emptyList()
     private var lights: List<TrafficLight> = emptyList()
     private var learnedPositions: Set<LatLng> = emptySet()
@@ -243,6 +248,7 @@ object GreenWaveController {
             store = StopEventStore(appContext).also { loggedStops = it.all().size }
             lightEvents = LightEventStore(appContext)
             sharedEvents = LightEventStore(appContext, LightEventStore.SHARED_FILE, watch = true)
+            calibrations = CalibrationStore(appContext)
             knownLights = KnownLights(appContext)
             rideLog = RideLog(appContext).also {
                 profileRange = it.profileRange()
@@ -303,6 +309,7 @@ object GreenWaveController {
      */
     private fun loadLights(path: List<LatLng>, revision: Int) {
         lightPositions = emptyList()
+        lightsRevision = -1
         val query = needsQuery(path)
         net.execute {
             if (revision != requestedRevision) return@execute
@@ -336,6 +343,7 @@ object GreenWaveController {
         val status = try {
             lightsPath = path
             lightPositions = TrafficLightsAlongRoute.select(path, knownSignals.toList())
+            lightsRevision = revision
             knownLights?.addAll(lightPositions)
             liveLights = emptyMap()
             publishRoute(revision)
@@ -670,7 +678,9 @@ object GreenWaveController {
     /**
      * Worker: the learned program for [position] when approached with [headingDeg],
      * left with [turn] and seen from the signal's own way or from one alongside
-     * ([sideway]); null arguments match any. Null if not learned.
+     * ([sideway]); null arguments match any. Null if not learned. A measured
+     * program (Nerd-Modus, [extra] is one not saved yet) wins unless the
+     * observations there contradict it (see [Calibration.learned]).
      */
     private fun learnedProgram(
         position: LatLng,
@@ -678,7 +688,16 @@ object GreenWaveController {
         nowEpochSec: Long,
         turn: LightEvent.Turn? = null,
         sideway: Boolean? = null,
+        extra: Calibration.Session? = null,
     ): RhythmEstimate? {
+        val observed = observedEvents(position, headingDeg, turn, sideway)
+        val measured = (calibrations?.near(position).orEmpty() + listOfNotNull(extra))
+            .filter { it.matches(headingDeg, turn, sideway) }
+        return Calibration.learned(measured, observed, nowEpochSec) ?: ObservationCycleEstimator.estimate(observed, nowEpochSec)
+    }
+
+    /** Worker: own and shared observations at [position] for this movement (see [learnedProgram]). */
+    private fun observedEvents(position: LatLng, headingDeg: Double?, turn: LightEvent.Turn?, sideway: Boolean?): List<LightEvent> {
         val events = (lightEvents?.at(position).orEmpty() + sharedEvents?.near(position).orEmpty())
             .filter { it.sameMovement(headingDeg, turn) && it.sameSide(sideway) }
         // Stops logged before light events existed count too (direction unknown).
@@ -686,7 +705,7 @@ object GreenWaveController {
         val legacy = store?.all().orEmpty()
             .filter { it.endEpochSec < since && StopEventMatcher.match(it.position, listOf(position)) == position }
             .flatMap { LightEvent.fromStop(it, position, null) }
-        return ObservationCycleEstimator.estimate(events + legacy, nowEpochSec)
+        return events + legacy
     }
 
     /** Worker: one line for a registered stop, e.g. "Ampel registriert (35 s) · 3 Stopps dort". */
@@ -754,6 +773,86 @@ object GreenWaveController {
         Log.i(TAG, "ride logged: ${entry.passedLights.size} lights, ${entry.redPasses} red passes")
         if (askRating) main.post { hostActivity()?.let { GreenWaveDialogs.showRating(it, entry) } }
     }
+
+    /** Nerd-Modus: traffic lights within [CALIBRATION_RADIUS_METERS] of [position], nearest first; [onResult] runs on main. */
+    internal fun lightsNear(position: LatLng, onResult: (List<LatLng>) -> Unit) {
+        net.execute {
+            val radius = CALIBRATION_RADIUS_METERS
+            val signals = offlineSignals { OfflineSignals.around(position, radius) }.ifEmpty {
+                try {
+                    OverpassClient.trafficSignals(String.format(
+                        java.util.Locale.ROOT,
+                        "[out:json][timeout:25];node[\"highway\"=\"traffic_signals\"](around:%d,%.6f,%.6f);out;",
+                        radius.roundToInt(), position.latitude, position.longitude,
+                    ))
+                } catch (e: Exception) {
+                    Log.w(TAG, "calibration light lookup failed", e)
+                    emptyList()
+                }
+            }
+            val near = signals.map { it to distanceMeters(it, position) }.filter { it.second <= radius }
+                .sortedBy { it.second }.map { it.first }
+            main.post { onResult(near) }
+        }
+    }
+
+    /** Nerd-Modus: what is learned for a calibration's light and movement without it and with it. */
+    internal class CalibrationModel(
+        val before: RhythmEstimate?,
+        val after: RhythmEstimate?,
+        /** Program measured so far, null until steady enough (see [Calibration.program]). */
+        val measured: RhythmEstimate?,
+        /** [measured] exists but the rider's observations there contradict it. */
+        val contradicted: Boolean,
+    )
+
+    /** Nerd-Modus: [CalibrationModel] for [session]; [onResult] runs on main. */
+    internal fun calibrationModel(session: Calibration.Session, onResult: (CalibrationModel) -> Unit) {
+        worker.execute {
+            val now = System.currentTimeMillis() / 1000
+            val heading = session.headingDeg?.toDouble()
+            val measured = Calibration.program(session)
+            val observed = observedEvents(session.light, heading, session.turn, null)
+            val model = CalibrationModel(
+                before = learnedProgram(session.light, heading, now, session.turn),
+                after = learnedProgram(session.light, heading, now, session.turn, extra = session),
+                measured = measured,
+                contradicted = measured != null && Calibration.learned(listOf(session), observed, now) == null,
+            )
+            main.post { onResult(model) }
+        }
+    }
+
+    /** Nerd-Modus: keep [session]; the route and the map dots pick it up right away. */
+    internal fun saveCalibration(session: Calibration.Session) {
+        worker.execute {
+            calibrations?.add(session)
+            knownLights?.addAll(listOf(session.light))
+            if (lightsRevision >= 0 && lightsRevision == requestedRevision) publishRoute(lightsRevision)
+            refreshAreaMarks()
+        }
+    }
+
+    /** Nerd-Modus: number of calibrations and their taps as CSV; [onResult] runs on main. */
+    internal fun calibrationExport(onResult: (count: Int, csv: String) -> Unit) {
+        worker.execute {
+            val store = calibrations
+            val count = store?.all()?.size ?: 0
+            val csv = store?.toCsv().orEmpty()
+            main.post { onResult(count, csv) }
+        }
+    }
+
+    internal fun clearCalibrations(then: () -> Unit) {
+        worker.execute {
+            calibrations?.clear()
+            if (lightsRevision >= 0 && lightsRevision == requestedRevision) publishRoute(lightsRevision)
+            refreshAreaMarks()
+            main.post(then)
+        }
+    }
+
+    private const val CALIBRATION_RADIUS_METERS = 80.0
 
     /** One row of the "Ampeldaten" list. */
     data class LightStats(

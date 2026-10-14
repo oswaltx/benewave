@@ -41,6 +41,11 @@ internal class GreenWaveSettings(context: Context) {
         get() = prefs.getBoolean(KEY_RUNS_RED, false)
         set(value) = prefs.edit().putBoolean(KEY_RUNS_RED, value).apply()
 
+    /** Nerd-Modus: calibrate a light by hand (menu "Ampel kalibrieren"). Off by default. */
+    var nerdMode: Boolean
+        get() = prefs.getBoolean(KEY_NERD_MODE, false)
+        set(value) = prefs.edit().putBoolean(KEY_NERD_MODE, value).apply()
+
     /** Development: after every ride, write the full export to Documents/greenWave (see DataExport). */
     var autoExport: Boolean
         get() = prefs.getBoolean(KEY_AUTO_EXPORT, false)
@@ -109,6 +114,7 @@ internal class GreenWaveSettings(context: Context) {
         const val KEY_RUNS_RED = "runs_red"
         const val KEY_LOGGING = "logging_enabled"
         const val KEY_ROUTE_MODE = "route_mode"
+        const val KEY_NERD_MODE = "nerd_mode"
         const val DEFAULT_MIN = 10f
         const val DEFAULT_MAX = 25f
     }

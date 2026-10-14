@@ -28,10 +28,7 @@ object ObservationCycleEstimator {
     private const val START_SLACK_SEC = 4
 
     fun estimate(events: List<LightEvent>, nowEpochSec: Long): RhythmEstimate? {
-        val relevant = events
-            .filter { nowEpochSec - it.epochSec in 0..MAX_AGE_SEC }
-            .filter { timeOfDayDistance(it.epochSec, nowEpochSec) <= TIME_OF_DAY_WINDOW_SEC }
-            .sortedBy { it.epochSec }
+        val relevant = relevant(events, nowEpochSec)
         if (relevant.size < MIN_EVENTS) return null
         if (relevant.count { it.kind == LightEvent.Kind.STOP_END } < MIN_GREEN_STARTS) return null
 
@@ -53,6 +50,19 @@ object ObservationCycleEstimator {
             confidence = final.accuracy,
         )
     }
+
+    /** Of [events], those that count at [nowEpochSec]: not older than [MAX_AGE_SEC], same time of day; oldest first. */
+    fun relevant(events: List<LightEvent>, nowEpochSec: Long): List<LightEvent> = events
+        .filter { inWindow(it.epochSec, nowEpochSec) }
+        .sortedBy { it.epochSec }
+
+    /** An observation made at [epochSec] still counts at [nowEpochSec]. */
+    fun inWindow(epochSec: Long, nowEpochSec: Long): Boolean =
+        nowEpochSec - epochSec in 0..MAX_AGE_SEC && timeOfDayDistance(epochSec, nowEpochSec) <= TIME_OF_DAY_WINDOW_SEC
+
+    /** Weighted share of [events] that [program] explains (green starts count double). */
+    fun agreement(events: List<LightEvent>, program: RhythmEstimate): Double =
+        accuracy(events, Fit(program.cycleLengthSec, program.greenStartOffsetSec, program.greenDurationSec, 0.0))
 
     private data class Fit(val cycle: Int, val start: Int, val green: Int, val accuracy: Double)
 

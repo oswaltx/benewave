@@ -88,6 +88,9 @@ internal object GreenWaveDialogs {
             },
             "Einstellungen" to { showSettings(activity) },
         )
+        if (GreenWaveController.settings()?.nerdMode == true) {
+            items.add(3, "Ampel kalibrieren" to { CalibrationDialogs.showMenu(activity) })
+        }
         if (tracks.isNotEmpty()) items.add("Aufzeichnungen teilen (${TrackFile.count(activity)})" to { shareTracks(activity, tracks) })
         items.add("Daten exportieren" to { exportData(activity) })
         items.add("Gemeinsam lernen" to { showSharing(activity) })
@@ -417,6 +420,15 @@ internal object GreenWaveDialogs {
             "Legt alle greenWave-Daten nach jeder Fahrt als Documents/greenWave/greenwave-latest.zip ab, " +
                 "z. B. für den Abgleich per Syncthing. Die Datei wird jedes Mal ersetzt.", small = true))
 
+        val nerd = SwitchCompat(context).apply {
+            text = "Nerd-Modus: Ampeln kalibrieren"
+            isChecked = settings.nerdMode
+        }
+        content.addView(nerd)
+        content.addView(text(context,
+            "Neuer Menüpunkt „Ampel kalibrieren“: An der Ampel stehen und bei jedem Wechsel auf Grün oder Rot " +
+                "tippen. Die Messung bleibt auf dem Gerät und fließt ins Lernen ein.", small = true))
+
         content.addView(text(context,
             "Live-Ampeldaten Hamburg: Freie und Hansestadt Hamburg, Datenlizenz Deutschland " +
                 "Namensnennung 2.0 (tld.iot.hamburg.de). Ampelstandorte: © OpenStreetMap-Mitwirkende.", small = true))
@@ -434,6 +446,7 @@ internal object GreenWaveDialogs {
                 settings.autoProfile = auto.isChecked
                 settings.runsRed = red.isChecked
                 settings.autoExport = autoExport.isChecked
+                settings.nerdMode = nerd.isChecked
                 settings.shareEnabled = share.isChecked
                 // Nothing queued may leave the device once sharing is off or the rider runs red.
                 if (!share.isChecked || red.isChecked) Thread { ShareQueue.clear(context.applicationContext) }.start()
@@ -451,13 +464,13 @@ internal object GreenWaveDialogs {
             .show()
     }
 
-    private fun column(context: Context) = LinearLayout(context).apply {
+    internal fun column(context: Context) = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
         val pad = dp(context, 20f)
         setPadding(pad, dp(context, 8f), pad, 0)
     }
 
-    private fun text(context: Context, value: String, small: Boolean = false) = TextView(context).apply {
+    internal fun text(context: Context, value: String, small: Boolean = false) = TextView(context).apply {
         text = value
         setTextSize(TypedValue.COMPLEX_UNIT_SP, if (small) 12f else 14f)
         setPadding(0, dp(context, 6f), 0, dp(context, 6f))
@@ -469,6 +482,6 @@ internal object GreenWaveDialogs {
         gravity = Gravity.CENTER
     }
 
-    private fun dp(context: Context, value: Float): Int =
+    internal fun dp(context: Context, value: Float): Int =
         TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, value, context.resources.displayMetrics).roundToInt()
 }
