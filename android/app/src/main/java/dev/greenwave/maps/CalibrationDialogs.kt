@@ -127,7 +127,7 @@ internal object CalibrationDialogs {
         direction.addView(unknown)
         content.addView(direction)
 
-        val compass = Compass(activity) { deg ->
+        val compass = Compass(activity.applicationContext) { deg ->
             compassButton.text = "Kompass: ${compassName(deg.toDouble())} ($deg°) – Handy in Fahrtrichtung halten"
         }
         compassButton.text = if (compass.available) "Kompass: Handy in Fahrtrichtung halten …" else "Kompass (nicht vorhanden)"
@@ -152,6 +152,20 @@ internal object CalibrationDialogs {
         turnGroup.check(10)
         content.addView(turnGroup)
 
+        content.addView(GreenWaveDialogs.text(activity, "Du stehst"))
+        val sides = listOf(
+            "Auf der Fahrbahn" to false,
+            "Auf einem Radweg neben der Fahrbahn" to true,
+            "Weiß nicht" to null,
+        )
+        val sideGroup = RadioGroup(activity).apply { orientation = RadioGroup.VERTICAL }
+        sides.forEachIndexed { i, (label, _) -> sideGroup.addView(RadioButton(activity).apply { id = 20 + i; text = label }) }
+        sideGroup.check(20)
+        content.addView(sideGroup)
+        content.addView(GreenWaveDialogs.text(activity,
+            "Für die Tempoempfehlung zählt eine Messung nur mit bekannter Fahrtrichtung, Abbiegen und Seite – " +
+                "sonst könnte sie für die Querstraße oder eine andere Spur gelten. Ohne sie wird nur angezeigt.", small = true))
+
         compass.start()
         MaterialAlertDialogBuilder(activity)
             .setTitle("Ampel kalibrieren")
@@ -163,21 +177,22 @@ internal object CalibrationDialogs {
                     else -> null
                 }
                 val turn = turns[turnGroup.checkedRadioButtonId - 10].second
+                val sideway = sides[sideGroup.checkedRadioButtonId - 20].second
                 if (direction.checkedRadioButtonId == compassButton.id && heading == null) {
                     Toast.makeText(activity, "Kompass ohne Wert, Richtung bleibt unbekannt.", Toast.LENGTH_LONG).show()
                 }
-                measure(activity, light, heading, turn)
+                measure(activity, light, heading, turn, sideway)
             }
             .setNegativeButton("Abbrechen", null)
             .setOnDismissListener { compass.stop() }
             .show()
     }
 
-    private fun measure(activity: Activity, light: LatLng, headingDeg: Int?, turn: LightEvent.Turn?) {
+    private fun measure(activity: Activity, light: LatLng, headingDeg: Int?, turn: LightEvent.Turn?, sideway: Boolean?) {
         val startMono = SystemClock.elapsedRealtime()
         val startEpochMs = System.currentTimeMillis()
         val taps = mutableListOf<Calibration.Tap>()
-        fun session() = Calibration.Session(light, headingDeg, turn, startEpochMs, taps.toList())
+        fun session() = Calibration.Session(light, headingDeg, turn, startEpochMs, taps.toList(), sideway)
 
         val content = GreenWaveDialogs.column(activity)
         val movement = listOfNotNull(
@@ -187,10 +202,17 @@ internal object CalibrationDialogs {
                 LightEvent.Turn.LEFT -> "links"
                 LightEvent.Turn.RIGHT -> "rechts"
                 LightEvent.Turn.U_TURN -> "wenden"
-                null -> null
+                null -> "Abbiegen egal"
+            },
+            when (sideway) {
+                false -> "Fahrbahn"
+                true -> "Radweg"
+                null -> "Seite unbekannt"
             },
         ).joinToString(", ")
-        content.addView(GreenWaveDialogs.text(activity, "Bei jedem Wechsel tippen. $movement", small = true))
+        content.addView(GreenWaveDialogs.text(activity, movement))
+        content.addView(GreenWaveDialogs.text(activity,
+            "„Wird grün“ beim Wechsel auf Grün, „Grün endet“ sobald Gelb kommt.", small = true))
         val status = TextView(activity).apply {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f)
             setPadding(0, GreenWaveDialogs.dp(activity, 8f), 0, GreenWaveDialogs.dp(activity, 8f))
@@ -220,7 +242,7 @@ internal object CalibrationDialogs {
             }
             val summary = Calibration.summary(taps)
             GreenWaveController.calibrationModel(session()) {
-                if (request == modelRequest) model.text = compare(summary, it)
+                if (request == modelRequest) model.text = compare(summary, it, session().directed)
             }
         }
 
@@ -248,7 +270,7 @@ internal object CalibrationDialogs {
             orientation = LinearLayout.HORIZONTAL
             addView(button("Wird\ngrün", Color.rgb(46, 125, 50), Calibration.Change.GREEN),
                 LinearLayout.LayoutParams(0, height, 1f).apply { marginEnd = gap })
-            addView(button("Wird\nrot", Color.rgb(198, 40, 40), Calibration.Change.RED),
+            addView(button("Grün\nendet", Color.rgb(198, 40, 40), Calibration.Change.RED),
                 LinearLayout.LayoutParams(0, height, 1f).apply { marginStart = gap })
         })
         content.addView(Button(activity).apply {
@@ -265,13 +287,20 @@ internal object CalibrationDialogs {
         update()
 
         val ticker = Handler(Looper.getMainLooper())
+        lateinit var dialog: AlertDialog
         val tick = object : Runnable {
             override fun run() {
+                // The activity went away without dismissing the dialog: stop, or the ticker keeps it alive.
+                if (activity.isFinishing || activity.isDestroyed) {
+                    dialog.dismiss()
+                    return
+                }
                 refresh()
                 ticker.postDelayed(this, 500)
             }
         }
-        val dialog = MaterialAlertDialogBuilder(activity)
+        var saved = false
+        dialog = MaterialAlertDialogBuilder(activity)
             .setTitle("Ampel kalibrieren")
             .setView(ScrollView(activity).apply { addView(content) })
             .setCancelable(false)
@@ -280,11 +309,13 @@ internal object CalibrationDialogs {
             .create()
         dialog.setOnShowListener {
             dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                if (saved) return@setOnClickListener
                 val session = session()
                 if (Calibration.phases(session.taps).none { it.plausible }) {
                     Toast.makeText(activity, "Noch keine vollständige Phase gemessen.", Toast.LENGTH_SHORT).show()
                     return@setOnClickListener
                 }
+                saved = true
                 GreenWaveController.saveCalibration(session)
                 Toast.makeText(activity, "Messung gespeichert (${taps.size} Wechsel).", Toast.LENGTH_SHORT).show()
                 dialog.dismiss()
@@ -332,7 +363,7 @@ internal object CalibrationDialogs {
     }
 
     /** Measured wait against the one the arrival time uses so far, and what is learned without and with this measurement. */
-    private fun compare(s: Calibration.Summary, m: GreenWaveController.CalibrationModel): String {
+    private fun compare(s: Calibration.Summary, m: GreenWaveController.CalibrationModel, directed: Boolean): String {
         fun trusted(e: RhythmEstimate?) = e != null && e.confidence >= RouteAdvice.MIN_CONFIDENCE
         fun program(e: RhythmEstimate) =
             "Umlauf ${e.cycleLengthSec} s, grün ${e.greenDurationSec} s (sicher ${(e.confidence * 100).roundToInt()} %)"
@@ -346,12 +377,15 @@ internal object CalibrationDialogs {
         }
         lines += "Bisher gelernt: " + if (trusted(m.before)) program(m.before!!) else "nichts"
         lines += when {
+            !directed -> "Ohne Fahrtrichtung, Abbiegen oder Seite nur zur Anzeige, nicht für die Tempoempfehlung."
             m.contradicted -> "Die Messung passt nicht zu deinen bisherigen Stopps und Durchfahrten hier und wird nicht verwendet. " +
                 "Richtige Ampel und Richtung gewählt?"
-            m.measured == null -> "Für die Tempoempfehlung zählt die Messung ab ${Calibration.MIN_PROGRAM_CYCLES} gleichmäßigen Umläufen."
+            m.measured == null -> "Für die Tempoempfehlung zählt die Messung ab ${Calibration.MIN_PROGRAM_CYCLES} gleichmäßigen Umläufen " +
+                "(Umlauf auf die Sekunde, Grünstarts auf 1,5 s genau)."
             else -> "Mit dieser Messung: " + if (trusted(m.after)) program(m.after!!) else "nichts"
         }
-        lines += "Eine Messung gilt zur gleichen Tageszeit (±90 min), 4 Wochen lang."
+        lines += "Eine Messung gilt zur gleichen Tageszeit (±90 min) eine Woche, bestätigt durch Fahrten oder eine " +
+            "zweite Messung an einem anderen Tag 4 Wochen."
         return lines.joinToString("\n")
     }
 

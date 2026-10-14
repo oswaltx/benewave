@@ -43,7 +43,7 @@ internal class CalibrationStore(context: Context) {
     /** One row per tap, for a spreadsheet. */
     fun toCsv(): String {
         val time = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.ROOT)
-        val out = StringBuilder("messung,start,lat,lon,richtung_grad,abbiegen,nr,wechsel,zeit_ms,ortszeit,sek_seit_vorigem\n")
+        val out = StringBuilder("messung,start,lat,lon,richtung_grad,abbiegen,radweg,nr,wechsel,zeit_ms,ortszeit,sek_seit_vorigem\n")
         sessions.forEachIndexed { s, session ->
             session.taps.forEachIndexed { i, tap ->
                 val previous = session.taps.getOrNull(i - 1)
@@ -54,6 +54,7 @@ internal class CalibrationStore(context: Context) {
                     session.light.longitude,
                     session.headingDeg ?: "",
                     session.turn?.name ?: "",
+                    session.sideway ?: "",
                     i + 1,
                     if (tap.change == Calibration.Change.GREEN) "gruen" else "rot",
                     session.epochMs(tap),
@@ -82,7 +83,7 @@ internal class CalibrationStore(context: Context) {
         sessions.forEach { array.put(toJson(it)) }
         val tmp = File(file.path + ".tmp")
         tmp.writeText(array.toString())
-        tmp.renameTo(file)
+        if (!tmp.renameTo(file)) Log.w("GreenWave", "calibrations not saved")
     }
 
     private companion object {
@@ -94,6 +95,7 @@ internal class CalibrationStore(context: Context) {
             .put("heading", s.headingDeg ?: JSONObject.NULL)
             .put("turn", s.turn?.name ?: JSONObject.NULL)
             .put("start_ms", s.startEpochMs)
+            .put("sideway", s.sideway ?: JSONObject.NULL)
             .put("taps", JSONArray().apply { s.taps.forEach { put(JSONArray().put(it.atMs).put(it.change.name)) } })
 
         fun fromJson(o: JSONObject): Calibration.Session {
@@ -103,6 +105,7 @@ internal class CalibrationStore(context: Context) {
                 headingDeg = if (o.isNull("heading")) null else o.getInt("heading"),
                 turn = if (o.isNull("turn")) null else LightEvent.Turn.valueOf(o.getString("turn")),
                 startEpochMs = o.getLong("start_ms"),
+                sideway = if (o.isNull("sideway")) null else o.getBoolean("sideway"),
                 taps = (0 until taps.length()).map {
                     val t = taps.getJSONArray(it)
                     Calibration.Tap(t.getLong(0), Calibration.Change.valueOf(t.getString(1)))

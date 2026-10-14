@@ -32,8 +32,13 @@ class CalibrationTest {
         }
     }
 
-    private fun session(taps: List<Tap>, heading: Int? = 90, turn: LightEvent.Turn? = LightEvent.Turn.STRAIGHT) =
-        Calibration.Session(light, heading, turn, start * 1000, taps)
+    private fun session(
+        taps: List<Tap>,
+        heading: Int? = 90,
+        turn: LightEvent.Turn? = LightEvent.Turn.STRAIGHT,
+        startEpochSec: Long = start,
+        sideway: Boolean? = false,
+    ) = Calibration.Session(light, heading, turn, startEpochSec * 1000, taps, sideway)
 
     @Test
     fun rejectsDoubleTapsAndSlips() {
@@ -87,22 +92,40 @@ class CalibrationTest {
     }
 
     @Test
-    fun threeSteadyCyclesGiveTheProgram() {
-        val program = assertNotNull(Calibration.program(session(taps(7, jitterMs = { if (it % 2 == 0) 600L * (it % 3) else -400L }))))
+    fun fiveSteadyCyclesGiveTheProgram() {
+        val program = assertNotNull(Calibration.program(session(taps(11, jitterMs = { if (it % 2 == 0) 600L * (it % 3) else -400L }))))
         assertEquals(cycle, program.cycleLengthSec)
-        // Late green taps and early red taps make the measured green up to a second shorter.
-        assertTrue(abs(program.greenDurationSec - green) <= 1, "green ${program.greenDurationSec}")
+        // Late green taps, early red taps and the margin for the late red tap: shorter, never longer.
+        assertTrue(program.greenDurationSec in green - 2..green, "green ${program.greenDurationSec}")
         assertTrue(abs(program.greenStartOffsetSec - greenStart) <= 1, "start ${program.greenStartOffsetSec}")
         // The estimator could not tell 90 s from 45 s from these taps; the measurement can.
-        assertNull(Calibration.program(session(taps(5))), "two cycles are too few")
-        assertNull(Calibration.program(session(taps(7, jitterMs = { if (it == 4) 12_000L else 0L }))), "varying cycles")
+        assertNull(Calibration.program(session(taps(9))), "four cycles are too few")
+        assertNull(Calibration.program(session(taps(11, jitterMs = { if (it == 4) 12_000L else 0L }))), "varying cycles")
+    }
+
+    @Test
+    fun cycleThatIsNoWholeSecondIsRejected() {
+        // 90.5 s: rounded to 90 the program would drift by 20 s an hour.
+        val taps = (0 until 11).map { i -> Tap((i / 2) * 90_500L + if (i % 2 == 0) 0 else 30_000L, if (i % 2 == 0) GREEN else RED) }
+        assertNull(Calibration.program(session(taps)))
+        val whole = (0 until 11).map { i -> Tap((i / 2) * 90_000L + if (i % 2 == 0) 0 else 30_000L, if (i % 2 == 0) GREEN else RED) }
+        // Exactly 30 s between the taps: the red tap may be late, so green counts as 29 s.
+        assertEquals(29, assertNotNull(Calibration.program(session(whole))).greenDurationSec)
+    }
+
+    @Test
+    fun missedChangeInTheMiddleStillGivesTheProgram() {
+        // Green 3 of 8 was missed: two reds in a row, five complete cycles left, a gap in the line through the green starts.
+        val all = taps(15)
+        val program = assertNotNull(Calibration.program(session(all.filterIndexed { i, _ -> i != 6 })))
+        assertEquals(cycle, program.cycleLengthSec)
     }
 
     @Test
     fun greenStartNearTheCycleEndIsNotSplit() {
         // Green starts at phase 0 of the epoch: taps fall just before and just after the ring's seam.
         val firstGreen = start + (0 - start).mod(cycle.toLong())
-        val taps = (0 until 7).map { i ->
+        val taps = (0 until 11).map { i ->
             val epochMs = (firstGreen + (i / 2) * cycle + if (i % 2 == 0) 0 else green) * 1000 + if (i % 4 == 0) -500L else 500L
             Tap(epochMs - start * 1000, if (i % 2 == 0) GREEN else RED)
         }
@@ -111,18 +134,26 @@ class CalibrationTest {
     }
 
     @Test
-    fun countsAtTheSameTimeOfDayForFourWeeks() {
-        val sessions = listOf(session(taps(7)))
+    fun uncheckedCountsAWeekAtTheSameTimeOfDay() {
+        val sessions = listOf(session(taps(11)))
         assertEquals(Calibration.UNCHECKED_CONFIDENCE, Calibration.learned(sessions, emptyList(), start + 3_600)?.confidence)
-        assertNotNull(Calibration.learned(sessions, emptyList(), start + 27 * 86_400L))
+        assertNotNull(Calibration.learned(sessions, emptyList(), start + 6 * 86_400L))
+        assertNull(Calibration.learned(sessions, emptyList(), start + 8 * 86_400L), "unchecked after a week")
         assertNull(Calibration.learned(sessions, emptyList(), start + 3 * 3_600), "other time of day")
-        assertNull(Calibration.learned(sessions, emptyList(), start + 29 * 86_400L), "too old")
         assertNull(Calibration.learned(sessions, emptyList(), start - 60), "from the future")
     }
 
     @Test
+    fun onlyDirectedMeasurementsSteerTheSpeed() {
+        for (s in listOf(session(taps(11), heading = null), session(taps(11), turn = null), session(taps(11), sideway = null))) {
+            assertNotNull(Calibration.program(s))
+            assertNull(Calibration.learned(listOf(s), emptyList(), start + 600))
+        }
+    }
+
+    @Test
     fun observationsCanContradictTheMeasurement() {
-        val sessions = listOf(session(taps(7)))
+        val sessions = listOf(session(taps(11)))
         val now = start + 1_800
         fun stop(epochSec: Long, kind: LightEvent.Kind) = LightEvent(light, epochSec, kind, 90)
         // Green starts at phase 10 and red at phase 40, as measured.
@@ -137,10 +168,27 @@ class CalibrationTest {
     }
 
     @Test
+    fun aSecondMeasurementOnAnotherDayConfirmsForFourWeeks() {
+        val first = session(taps(11))
+        // 3 days later at the same time; 3 days are a whole number of 90 s cycles.
+        val second = session(taps(11, jitterMs = { if (it % 2 == 0) 700L else -300L }), startEpochSec = start + 3 * 86_400L)
+        val later = start + 20 * 86_400L + 600
+        assertNull(Calibration.learned(listOf(first), emptyList(), later), "alone: older than a week")
+        assertTrue(Calibration.learned(listOf(first, second), emptyList(), later)!!.confidence >= ObservationCycleEstimator.MIN_HELD_OUT_ACCURACY)
+        // The same day does not confirm.
+        val sameDay = session(taps(11), startEpochSec = start + 30 * 60)
+        assertEquals(Calibration.UNCHECKED_CONFIDENCE, Calibration.learned(listOf(first, sameDay), emptyList(), start + 3_600)?.confidence)
+        // Measurements that disagree cancel each other.
+        val shifted = session(taps(11), startEpochSec = start + 3 * 86_400L + 45)
+        assertNull(Calibration.learned(listOf(first, shifted), emptyList(), start + 3 * 86_400L + 600))
+    }
+
+    @Test
     fun matchesMovementLikeLightEvents() {
         val s = session(taps(3), heading = 90, turn = LightEvent.Turn.LEFT)
-        assertTrue(s.matches(80.0, LightEvent.Turn.LEFT, null))
-        assertTrue(s.matches(null, null, true))
+        assertTrue(s.matches(80.0, LightEvent.Turn.LEFT, false))
+        assertTrue(s.matches(null, null, null))
+        assertFalse(s.matches(90.0, LightEvent.Turn.LEFT, true), "measured on the carriageway, asked for the cycleway")
         assertFalse(s.matches(270.0, LightEvent.Turn.LEFT, null))
         assertFalse(s.matches(90.0, LightEvent.Turn.STRAIGHT, null))
         assertEquals(0, Calibration.exitHeading(90, LightEvent.Turn.LEFT))

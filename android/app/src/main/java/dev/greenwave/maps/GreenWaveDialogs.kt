@@ -427,7 +427,8 @@ internal object GreenWaveDialogs {
         content.addView(nerd)
         content.addView(text(context,
             "Neuer Menüpunkt „Ampel kalibrieren“: An der Ampel stehen und bei jedem Wechsel auf Grün oder Rot " +
-                "tippen. Die Messung bleibt auf dem Gerät und fließt ins Lernen ein.", small = true))
+                "tippen. Die Messung bleibt auf dem Gerät und fließt ins Lernen ein, auch wenn der Modus später " +
+                "wieder aus ist (löschen im Menü bei eingeschaltetem Modus).", small = true))
 
         content.addView(text(context,
             "Live-Ampeldaten Hamburg: Freie und Hansestadt Hamburg, Datenlizenz Deutschland " +

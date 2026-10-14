@@ -5,6 +5,7 @@ import dev.greenwave.shared.tracking.LightEvent
 import dev.greenwave.shared.tracking.ObservationCycleEstimator
 import dev.greenwave.shared.tracking.RhythmEstimate
 import kotlin.math.abs
+import kotlin.math.floor
 import kotlin.math.roundToInt
 import kotlin.math.roundToLong
 
@@ -17,8 +18,9 @@ import kotlin.math.roundToLong
  * Unlike the scattered observations of rides, consecutive taps show the cycle itself, so a
  * steady measurement gives the program directly ([program]); learning it from the taps as
  * events would mix up 90 s with 45 s, as both explain green and red starts alike. Like
- * learned programs it only counts at the same time of day and for four weeks, and only
- * while the rider's own observations there don't contradict it ([learned]).
+ * learned programs it only counts at the same time of day, and only while the rider's own
+ * observations and other measurements there don't contradict it ([learned]). A measurement
+ * nothing has confirmed yet counts for a week, a confirmed one for four.
  */
 object Calibration {
     /** The same button again within this time is a double tap and ignored. */
@@ -36,14 +38,32 @@ object Calibration {
     /** Complete cycles before a summary is shown. */
     const val MIN_CYCLES = 2
 
-    /** Steady cycles before the measured program is used for advice. */
-    const val MIN_PROGRAM_CYCLES = 3
+    /**
+     * Steady cycles before the measured program is used for advice: with fewer, the cycle
+     * can't be told from one half a second longer, which drifts by 20 s an hour.
+     */
+    const val MIN_PROGRAM_CYCLES = 5
 
-    /** Green starts may deviate this much from the integer cycle (otherwise it is not one, and the program drifts). */
-    const val MAX_START_DEVIATION_SEC = 2.0
+    /** The cycle fitted over all green starts may be this far from a whole second, else it is not one. */
+    const val MAX_CYCLE_ERROR_SEC = 0.25
 
-    /** Confidence of a measured program the rider's observations could not check yet. */
-    const val UNCHECKED_CONFIDENCE = 0.9
+    /** Each green start may deviate this much from the fitted integer cycle. */
+    const val MAX_START_DEVIATION_SEC = 1.5
+
+    /**
+     * Taps come late; the change to red is taken this much earlier, so the measured green
+     * ends rather too soon than too late (the green start is late anyway, the safe side).
+     */
+    const val RED_TAP_DELAY_SEC = 0.5
+
+    /** Confidence of a measured program nothing could check yet; it counts for [UNCHECKED_MAX_AGE_SEC] only. */
+    const val UNCHECKED_CONFIDENCE = 0.7
+    const val UNCHECKED_MAX_AGE_SEC = 7 * 86_400L
+
+    private const val GREEN_EVENT_SHIFT_SEC = 2L
+
+    /** Another measurement confirms one only if made on another day. */
+    private const val OTHER_DAY_SEC = 12 * 3_600L
 
     enum class Change { GREEN, RED }
 
@@ -52,18 +72,23 @@ object Calibration {
 
     data class Session(
         val light: LatLng,
-        /** Direction of approach (0 = north), null if unknown: then it counts for every approach. */
+        /** Direction of approach (0 = north), null if unknown: then it is shown but never used for advice. */
         val headingDeg: Int?,
-        /** Movement the measured signal is for, null if unknown. */
+        /** Movement the measured signal is for, null if unknown (shown only, like [headingDeg]). */
         val turn: LightEvent.Turn?,
         val startEpochMs: Long,
         val taps: List<Tap>,
+        /** Measured from a cycleway alongside the signal's way (as [LightEvent.sideway]), null if unknown. */
+        val sideway: Boolean? = null,
     ) {
+        /** Only a measurement for one known approach, turn and side may steer the speed (see [learned]). */
+        val directed: Boolean get() = headingDeg != null && turn != null && sideway != null
+
         fun epochMs(tap: Tap): Long = startEpochMs + tap.atMs
 
         /** Measured for this approach and turn, seen from this kind of way; as [LightEvent.sameMovement] and [LightEvent.sameSide]. */
         fun matches(approachDeg: Double?, turn: LightEvent.Turn?, sideway: Boolean?): Boolean =
-            LightEvent(light, startEpochMs / 1000, LightEvent.Kind.STOP_END, headingDeg, exitHeading(headingDeg, this.turn))
+            LightEvent(light, startEpochMs / 1000, LightEvent.Kind.STOP_END, headingDeg, exitHeading(headingDeg, this.turn), this.sideway)
                 .let { it.sameMovement(approachDeg, turn) && it.sameSide(sideway) }
     }
 
@@ -140,31 +165,44 @@ object Calibration {
     }
 
     /**
-     * The program measured in [session]: integer cycle and green from the medians, green
-     * start from the green taps. Null unless [MIN_PROGRAM_CYCLES] steady cycles were
-     * measured and every green start fits the integer cycle within [MAX_START_DEVIATION_SEC].
+     * The program measured in [session]. The cycle is the slope of a line through all green
+     * starts (numbered by cycle, so a missed change leaves a gap but no error); it must be
+     * within [MAX_CYCLE_ERROR_SEC] of a whole second and every green start within
+     * [MAX_START_DEVIATION_SEC] of that line. Null unless [MIN_PROGRAM_CYCLES] steady cycles
+     * were measured.
      */
     fun program(session: Session): RhythmEstimate? {
         val s = summary(session.taps)
         if (s.cycles < MIN_PROGRAM_CYCLES || !s.steady) return null
-        val starts = session.taps.zipWithNext()
-            .filter { (a, b) -> a.change == Change.GREEN && b.change == Change.RED && (b.atMs - a.atMs) / 1000.0 <= MAX_PHASE_SEC }
-            .map { (a, _) -> session.epochMs(a) }
-        if (starts.isEmpty()) return null
-        // A median of a few cycles is not exact to the second; take the integer cycle around it
-        // that lines up all green starts best.
-        val approx = s.cycleSec!!.roundToInt()
-        val (cycle, deviations) = (approx - 1..approx + 1)
-            .map { it to startDeviations(starts, it * 1000L) }
-            .minBy { (_, d) -> d.maxOf { abs(it) } }
-        if (deviations.any { abs(it) > MAX_START_DEVIATION_SEC }) return null
-        val green = s.greenSec?.roundToInt() ?: return null
-        if (green < ObservationCycleEstimator.MIN_GREEN_SEC || green > cycle - ObservationCycleEstimator.MIN_GREEN_SEC) return null
+        val approxMs = s.cycleSec!! * 1000
+        // Green taps next to a plausible red phase; one without is a stray tap after a missed change.
+        val taps = session.taps
+        fun plausible(a: Tap, b: Tap) = a.change != b.change && (b.atMs - a.atMs) / 1000.0 <= MAX_PHASE_SEC
+        val starts = taps.indices
+            .filter { i ->
+                taps[i].change == Change.GREEN &&
+                    ((i > 0 && plausible(taps[i - 1], taps[i])) || (i < taps.lastIndex && plausible(taps[i], taps[i + 1])))
+            }
+            .map { session.epochMs(taps[it]) }
+        val t0 = starts.first()
+        val ks = starts.map { ((it - t0) / approxMs).roundToInt() }
+        if (ks.last() < MIN_PROGRAM_CYCLES) return null
+        val kMean = ks.average()
+        val tMean = starts.map { (it - t0).toDouble() }.average()
+        val slopeSec = ks.indices.sumOf { (ks[it] - kMean) * (starts[it] - t0 - tMean) } /
+            ks.sumOf { (it - kMean) * (it - kMean) } / 1000
+        val cycle = slopeSec.roundToInt()
+        if (abs(slopeSec - cycle) > MAX_CYCLE_ERROR_SEC) return null
         val cycleMs = cycle * 1000L
-        val offsetMs = starts.first().mod(cycleMs) + (median(deviations)!! * 1000).roundToLong()
+        // Every green start moved back to the first cycle: all the same moment if the cycle is right.
+        val firstCycle = starts.indices.map { (starts[it] - ks[it] * cycleMs).toDouble() }
+        val startMs = median(firstCycle)!!
+        if (firstCycle.any { abs(it - startMs) > MAX_START_DEVIATION_SEC * 1000 }) return null
+        val green = floor(s.greenSec!! - RED_TAP_DELAY_SEC).toInt()
+        if (green < ObservationCycleEstimator.MIN_GREEN_SEC || green > cycle - ObservationCycleEstimator.MIN_GREEN_SEC) return null
         return RhythmEstimate(
             cycleLengthSec = cycle,
-            greenStartOffsetSec = (offsetMs.mod(cycleMs) / 1000.0).roundToInt() % cycle,
+            greenStartOffsetSec = (startMs.roundToLong().mod(cycleMs) / 1000.0).roundToInt() % cycle,
             greenDurationSec = green,
             sampleCount = session.taps.size,
             confidence = 1.0,
@@ -172,28 +210,63 @@ object Calibration {
     }
 
     /**
-     * The newest measured program among [sessions] that counts at [nowEpochSec] (same time
-     * of day, not too old, as in [ObservationCycleEstimator]) and agrees with the rider's
-     * [observed] events there, if there are enough of them to check; null if none.
+     * The newest measured program among [sessions] that counts at [nowEpochSec] and that
+     * nothing contradicts; null if none. Only [Session.directed] measurements count. The
+     * check uses the rider's [observed] events and the taps of measurements on other days:
+     * with at least [ObservationCycleEstimator.MIN_HELD_OUT] of them the program must
+     * explain them as well as a learned one its held-out events and counts for four weeks
+     * (same time of day, as in [ObservationCycleEstimator]); with fewer, a week.
      * [sessions] must already be those for the light and movement asked about.
      */
     fun learned(sessions: List<Session>, observed: List<LightEvent>, nowEpochSec: Long): RhythmEstimate? {
-        val check = ObservationCycleEstimator.relevant(observed, nowEpochSec)
-        return sessions
+        val directed = sessions.filter { it.directed }
+        return directed
             .filter { ObservationCycleEstimator.inWindow(it.startEpochMs / 1000, nowEpochSec) }
             .sortedByDescending { it.startEpochMs }
             .firstNotNullOfOrNull { session ->
                 val program = program(session) ?: return@firstNotNullOfOrNull null
-                if (check.size < ObservationCycleEstimator.MIN_HELD_OUT) return@firstNotNullOfOrNull program.copy(confidence = UNCHECKED_CONFIDENCE)
-                val agreement = ObservationCycleEstimator.agreement(check, program)
-                if (agreement < ObservationCycleEstimator.MIN_HELD_OUT_ACCURACY) null else program.copy(confidence = agreement)
+                val otherDays = directed
+                    .filter { abs(it.startEpochMs - session.startEpochMs) / 1000 >= OTHER_DAY_SEC }
+                    .flatMap { events(it) }
+                val check = ObservationCycleEstimator.relevant(observed + otherDays, nowEpochSec)
+                when {
+                    check.size >= ObservationCycleEstimator.MIN_HELD_OUT -> {
+                        val agreement = ObservationCycleEstimator.agreement(check, program)
+                        if (agreement < ObservationCycleEstimator.MIN_HELD_OUT_ACCURACY) null else program.copy(confidence = agreement)
+                    }
+                    nowEpochSec - session.startEpochMs / 1000 <= UNCHECKED_MAX_AGE_SEC -> program.copy(confidence = UNCHECKED_CONFIDENCE)
+                    else -> null
+                }
             }
     }
 
-    /** Each of [startsEpochMs] on the ring of [cycleMs], relative to the first, in seconds (−cycle/2, cycle/2]. */
-    private fun startDeviations(startsEpochMs: List<Long>, cycleMs: Long): List<Double> {
-        val first = startsEpochMs.first().mod(cycleMs)
-        return startsEpochMs.map { ((it.mod(cycleMs) - first + cycleMs / 2).mod(cycleMs) - cycleMs / 2) / 1000.0 }
+    /**
+     * Taps of [session] as observations to check another measurement against: a change to
+     * green is a green start, a change to red the start of red. Only taps that bound a
+     * plausible phase.
+     */
+    private fun events(session: Session): List<LightEvent> {
+        val taps = session.taps
+        val used = BooleanArray(taps.size)
+        taps.zipWithNext().forEachIndexed { i, (a, b) ->
+            if (a.change != b.change && (b.atMs - a.atMs) / 1000.0 <= MAX_PHASE_SEC) {
+                used[i] = true
+                used[i + 1] = true
+            }
+        }
+        val exit = exitHeading(session.headingDeg, session.turn)
+        return taps.filterIndexed { i, _ -> used[i] }.map { tap ->
+            LightEvent(
+                light = session.light,
+                // A green start as event counts only up to 4 s after the program's start and never
+                // before it; two people's taps differ by a second or so, so move it 2 s later.
+                epochSec = session.epochMs(tap) / 1000 + if (tap.change == Change.GREEN) GREEN_EVENT_SHIFT_SEC else 0,
+                kind = if (tap.change == Change.GREEN) LightEvent.Kind.STOP_END else LightEvent.Kind.STOP_START,
+                headingDeg = session.headingDeg,
+                exitHeadingDeg = exit,
+                sideway = session.sideway,
+            )
+        }
     }
 
     /** Leaving direction for [turn] (right = clockwise, as in [LightEvent.turnOf]); null if either is unknown. */
