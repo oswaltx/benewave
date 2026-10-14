@@ -168,6 +168,18 @@ class CalibrationTest {
     }
 
     @Test
+    fun redStartsAloneConfirmNothing() {
+        val sessions = listOf(session(taps(11)))
+        // Three stops in red that any program with a short green would explain as well.
+        val reds = (1..3).map { d ->
+            val t = start - d * 86_400L + (greenStart - (start - d * 86_400L)).mod(cycle.toLong())
+            LightEvent(light, t - 30, LightEvent.Kind.STOP_START, 90)
+        }
+        assertEquals(Calibration.UNCHECKED_CONFIDENCE, Calibration.learned(sessions, reds, start + 1_800)?.confidence)
+        assertNull(Calibration.learned(sessions, reds, start + 8 * 86_400L), "still unchecked after a week")
+    }
+
+    @Test
     fun aSecondMeasurementOnAnotherDayConfirmsForFourWeeks() {
         val first = session(taps(11))
         // 3 days later at the same time; 3 days are a whole number of 90 s cycles.

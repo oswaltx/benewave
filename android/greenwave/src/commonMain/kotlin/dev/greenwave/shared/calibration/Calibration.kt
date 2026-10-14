@@ -44,8 +44,11 @@ object Calibration {
      */
     const val MIN_PROGRAM_CYCLES = 5
 
-    /** The cycle fitted over all green starts may be this far from a whole second, else it is not one. */
-    const val MAX_CYCLE_ERROR_SEC = 0.25
+    /**
+     * The cycle fitted over all green starts may be this far from a whole second, else it is
+     * not one (over five cycles, tap jitter of ±0.3 s moves the fit by about 0.07 s).
+     */
+    const val MAX_CYCLE_ERROR_SEC = 0.15
 
     /** Each green start may deviate this much from the fitted integer cycle. */
     const val MAX_START_DEVIATION_SEC = 1.5
@@ -213,7 +216,8 @@ object Calibration {
      * The newest measured program among [sessions] that counts at [nowEpochSec] and that
      * nothing contradicts; null if none. Only [Session.directed] measurements count. The
      * check uses the rider's [observed] events and the taps of measurements on other days:
-     * with at least [ObservationCycleEstimator.MIN_HELD_OUT] of them the program must
+     * with at least [ObservationCycleEstimator.MIN_HELD_OUT] of them, including
+     * [ObservationCycleEstimator.MIN_GREEN_STARTS] green starts, the program must
      * explain them as well as a learned one its held-out events and counts for four weeks
      * (same time of day, as in [ObservationCycleEstimator]); with fewer, a week.
      * [sessions] must already be those for the light and movement asked about.
@@ -229,8 +233,11 @@ object Calibration {
                     .filter { abs(it.startEpochMs - session.startEpochMs) / 1000 >= OTHER_DAY_SEC }
                     .flatMap { events(it) }
                 val check = ObservationCycleEstimator.relevant(observed + otherDays, nowEpochSec)
+                // Red starts and pass-throughs fit a wrong program by chance far more often than
+                // green starts, so like the estimator a check needs some of those.
+                val greenStarts = check.count { it.kind == LightEvent.Kind.STOP_END }
                 when {
-                    check.size >= ObservationCycleEstimator.MIN_HELD_OUT -> {
+                    check.size >= ObservationCycleEstimator.MIN_HELD_OUT && greenStarts >= ObservationCycleEstimator.MIN_GREEN_STARTS -> {
                         val agreement = ObservationCycleEstimator.agreement(check, program)
                         if (agreement < ObservationCycleEstimator.MIN_HELD_OUT_ACCURACY) null else program.copy(confidence = agreement)
                     }

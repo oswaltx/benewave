@@ -160,7 +160,8 @@ internal object CalibrationDialogs {
         )
         val sideGroup = RadioGroup(activity).apply { orientation = RadioGroup.VERTICAL }
         sides.forEachIndexed { i, (label, _) -> sideGroup.addView(RadioButton(activity).apply { id = 20 + i; text = label }) }
-        sideGroup.check(20)
+        // No default: the side must be chosen on purpose to count for the advice.
+        sideGroup.check(22)
         content.addView(sideGroup)
         content.addView(GreenWaveDialogs.text(activity,
             "Für die Tempoempfehlung zählt eine Messung nur mit bekannter Fahrtrichtung, Abbiegen und Seite – " +
