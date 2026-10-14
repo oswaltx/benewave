@@ -70,7 +70,9 @@ internal object RideHistory {
             stops = stops,
             waitSec = stops.sumOf { it.durationSec },
             stopsAtLights = stops.count { StopEventMatcher.match(it.position, lights) != null },
-            suggestedEtaSec = first?.takeUnless { it.isNull("eta_s") }?.optInt("eta_s"),
+            // Router time plus the expected waits at its lights (since 14.10.2026; before, the
+            // router counted 15 s per signal on car roads itself).
+            suggestedEtaSec = first?.takeUnless { it.isNull("eta_s") }?.let { it.optInt("eta_s") + it.optInt("eta_wait_s", 0) },
             suggestedLengthMeters = first?.optInt("length_m"),
             reroutes = maxOf(0, (routes?.length() ?: 0) - 1),
             rating = rides.firstOrNull { it.startEpochSec in start..end || start in it.startEpochSec..it.endEpochSec }?.rating,

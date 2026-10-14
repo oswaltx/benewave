@@ -129,10 +129,11 @@ public class RoutingController
 
   private void onBuiltRoute()
   {
-    mCachedRoutingInfo = Framework.nativeGetRouteFollowingInfo();
     if (mLastRouterType == Router.Transit)
       mCachedTransitRouteInfo = Framework.nativeGetTransitRouteInfo();
     updateRouteGeometry();
+    // greenWave: after the route listeners, so RoutingInfo.timeAdjuster sees this route, not the last one.
+    mCachedRoutingInfo = Framework.nativeGetRouteFollowingInfo();
     setBuildState(BuildState.BUILT);
     mLastBuildProgress = 100;
     if (mContainer != null)
@@ -924,5 +925,16 @@ public class RoutingController
   public void updateCachedRoutingInfo(@Nullable RoutingInfo info)
   {
     mCachedRoutingInfo = info;
+  }
+
+  // greenWave: the built route's time changed (expected waits at traffic lights, see
+  // RoutingInfo.timeAdjuster); fetch it again and refresh the route plan.
+  public void refreshRoutingInfo()
+  {
+    if (!isBuilt())
+      return;
+    mCachedRoutingInfo = Framework.nativeGetRouteFollowingInfo();
+    if (isPlanning())
+      updateProgress();
   }
 }

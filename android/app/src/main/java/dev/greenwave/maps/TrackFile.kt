@@ -24,6 +24,11 @@ internal class TrackFile(context: Context, startEpochSec: Long) {
     /** A route the app suggested during this ride (one entry per reroute), for comparing with the track. */
     fun addRoute(route: JSONObject) {
         routes.put(route)
+        saveRoutes()
+    }
+
+    /** Writes the routes again, e.g. after one of them got more fields. */
+    fun saveRoutes() {
         val tmp = File(routesFile.path + ".tmp")
         tmp.writeText(routes.toString())
         tmp.renameTo(routesFile)

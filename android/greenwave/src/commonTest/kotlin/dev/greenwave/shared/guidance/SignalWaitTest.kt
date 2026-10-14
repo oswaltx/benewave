@@ -55,5 +55,7 @@ class SignalWaitTest {
         val later = SignalWait.ahead(waits, progressMeters = 1_000.0)
         assertEquals(SignalWait.Summary(SignalWait.DEFAULT_WAIT_SEC, lights = 1, known = 0), later)
         assertEquals(SignalWait.Summary(0.0, 0, 0), SignalWait.ahead(waits, progressMeters = 5_000.0))
+        // At the light itself it counts as passed.
+        assertEquals(1, SignalWait.ahead(waits, progressMeters = waits[0].alongMeters).lights)
     }
 }

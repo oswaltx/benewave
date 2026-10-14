@@ -129,12 +129,19 @@ class GreenWavePanel @JvmOverloads constructor(
             else -> "${state.learnedCount}/${state.lightCount} gelernt"
         }
         // Part of the arrival time; unknown lights count a fixed estimate each.
-        val wait = state.signalWait?.takeIf { it.lights > 0 }?.let {
-            val sec = it.waitSec
-            "Warten an Ampeln ~" + if (sec < 90) "${(sec / 10).roundToInt() * 10} s" else "${(sec / 60).roundToInt()} min"
-        }
+        val wait = state.signalWait?.takeIf { it.lights > 0 }?.let { waitText(it.waitSec, it.lights - it.known) }
         val parts = listOfNotNull(learned, wait)
         return if (parts.isEmpty()) "" else "\n" + parts.joinToString(" · ")
+    }
+
+    /** Waits at the lights still ahead; [estimated] of them count a fixed guess (unknown program). */
+    private fun waitText(sec: Double, estimated: Int): String {
+        val time = when {
+            sec < 10 -> "<10 s"
+            sec < 90 -> "~${(sec / 10).roundToInt() * 10} s"
+            else -> "~${(sec / 60).roundToInt()} min"
+        }
+        return "Warten $time" + if (estimated > 0) " ($estimated geschätzt)" else ""
     }
 
     private fun formatDistance(meters: Double): String =

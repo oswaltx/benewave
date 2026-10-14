@@ -107,10 +107,13 @@ object GreenWaveController {
     private const val LIVE_BATCH = 8
     /** Learned lights of [route] (main thread copy of [learnedPositions]). */
     @Volatile private var routeLearned: Set<LatLng> = emptySet()
-    /** Expected wait per intersection of [route], for the arrival time (empty until its lights are known). */
-    @Volatile private var signalWaits: List<SignalWait.Wait> = emptyList()
-    /** How far along [route] the rider is; 0 while planning. */
-    @Volatile private var progressMeters = 0.0
+    /**
+     * Expected wait per intersection of the route with [revision], for the arrival time, and how
+     * far along it the rider is (0 until navigating). One object, so [adjustedTime] on another
+     * thread never mixes two routes. Null until the route's lights are known.
+     */
+    private class EtaBasis(val revision: Int, val waits: List<SignalWait.Wait>, val progressMeters: Double)
+    @Volatile private var etaBasis: EtaBasis? = null
     @Volatile var lightsStatus: LightsStatus = LightsStatus.NO_ROUTE
         private set
 
@@ -257,7 +260,7 @@ object GreenWaveController {
         if (geometry.pointCount < 2 || controller.lastRouterType != Router.Bicycle) {
             val wasActive = route != null
             route = null
-            signalWaits = emptyList()
+            etaBasis = null
             if (wasActive) Framework.nativeClearGreenWaveMarks()
             lightsStatus = LightsStatus.NO_ROUTE
             requestedRevision = -1
@@ -269,11 +272,11 @@ object GreenWaveController {
         failedAttempts = 0
         val path = geometry.mJunctions.map { LatLng(latitude = it.mLat, longitude = it.mLon) }
         route = Route(path = path, trafficLights = emptyList())
-        signalWaits = emptyList()
-        progressMeters = 0.0
+        etaBasis = null
         lightsStatus = LightsStatus.LOADING
         val revision = geometry.mRevision
-        val suggestion = suggestedRouteJson(path, controller.cachedRoutingInfo?.totalTimeInSeconds)
+        // The router's time without signal waits; they are added once the lights are known (eta_wait_s).
+        val suggestion = suggestedRouteJson(path, Framework.nativeGetRouteFollowingInfo()?.totalTimeInSeconds)
         worker.execute {
             suggestedRoute = suggestion
             track?.addRoute(suggestion)
@@ -428,11 +431,18 @@ object GreenWaveController {
         val positions = lightPositions
         val withData = lightsWithData(positions)
         val waits = SignalWait.along(Route(path = path, trafficLights = lights), learnedSet)
+        suggestedRoute?.takeIf { revision == requestedRevision && !it.has("eta_wait_s") }?.let {
+            it.put("eta_wait_s", SignalWait.ahead(waits, 0.0).waitSec.roundToInt())
+            track?.saveRoutes()
+        }
         main.post {
             if (revision == requestedRevision) {
                 route = Route(path = path, trafficLights = lights)
                 routeLearned = learnedSet
-                signalWaits = waits
+                val progress = etaBasis?.takeIf { it.revision == revision }?.progressMeters ?: 0.0
+                etaBasis = EtaBasis(revision, waits, progress)
+                // The time shown while planning was taken before the lights were known.
+                RoutingController.get().refreshRoutingInfo()
                 learnedCount = count
                 liveCount = liveNow
                 showMarks(positions.map { it to markState(it, learnedSet, live.keys, withData) })
@@ -447,7 +457,7 @@ object GreenWaveController {
     fun onRideLocation(location: Location) {
         val current = route ?: return
         val update = location.toUpdate()
-        progressMeters = distanceAlongPath(current.path, update.position)
+        updateProgress(current, update.position)
         if (settings?.loggingEnabled == false) return
         val revision = requestedRevision
         val fix = Location(location)
@@ -1100,10 +1110,18 @@ object GreenWaveController {
             return State(lightsStatus, current.trafficLights.size, learnedCount, null, liveCount)
         }
         val update = location.toUpdate()
-        progressMeters = distanceAlongPath(current.path, update.position)
+        updateProgress(current, update.position)
         val advice = RouteAdvice.advice(current, routeLearned, update, speedRange)
-        val wait = SignalWait.ahead(signalWaits, progressMeters)
+        val wait = etaBasis?.let { SignalWait.ahead(it.waits, it.progressMeters) }
         return State(LightsStatus.READY, current.trafficLights.size, learnedCount, advice, liveCount, wait)
+    }
+
+    /** Only while navigating: a planned route may start elsewhere than the rider is. */
+    private fun updateProgress(current: Route, position: LatLng) {
+        if (!RoutingController.get().isNavigating) return
+        val basis = etaBasis ?: return
+        if (basis.revision != requestedRevision) return
+        etaBasis = EtaBasis(basis.revision, basis.waits, distanceAlongPath(current.path, position))
     }
 
     /**
@@ -1113,8 +1131,8 @@ object GreenWaveController {
      * until the route's lights are loaded it holds no signal waits. Any thread.
      */
     fun adjustedTime(routerSec: Int): Int {
-        if (route == null) return routerSec
-        val wait = SignalWait.ahead(signalWaits, progressMeters).waitSec
-        return (routerSec + wait).roundToInt()
+        val basis = etaBasis ?: return routerSec
+        if (route == null || basis.revision != requestedRevision) return routerSec
+        return (routerSec + SignalWait.ahead(basis.waits, basis.progressMeters).waitSec).roundToInt()
     }
 }
