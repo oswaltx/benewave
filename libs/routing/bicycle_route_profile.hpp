@@ -47,5 +47,11 @@ BicycleRouteProfile GetBicycleRouteProfile();
 double GetRoadPenaltyFactor(BicycleRouteFactors const & factors, RoadPenalty::Type type);
 double GetRoadSpeedFactor(BicycleRouteFactors const & factors, std::optional<HighwayType> type);
 
+// Factor for a penalty in a bicycle route's travel time (ETA), independent of the profile.
+// Traffic signals count 0 here: the app adds the expected wait per light itself, from learned
+// programs where it has them (greenWave SignalWait). CoMaps only knows signals on car roads, so
+// a fixed time here would miss those on cycle paths and could not be told apart from them.
+double GetRoadPenaltyEtaFactor(RoadPenalty::Type type);
+
 std::string DebugPrint(BicycleRouteProfile profile);
 }  // namespace routing

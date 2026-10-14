@@ -134,6 +134,8 @@ public class MwmApplication extends Application implements Application.ActivityL
     mOrganicMaps = new OrganicMaps(getApplicationContext(), BuildConfig.FLAVOR, BuildConfig.APPLICATION_ID,
                                    BuildConfig.VERSION_CODE, BuildConfig.VERSION_NAME,
                                    BuildConfig.FILE_PROVIDER_AUTHORITY, mLocationProviderFactory);
+    // greenWave: route mode for bicycle routes, before a saved route is rebuilt.
+    dev.greenwave.maps.RouteMode.activateSaved(this);
 
     ConnectionState.INSTANCE.initialize(this);
 

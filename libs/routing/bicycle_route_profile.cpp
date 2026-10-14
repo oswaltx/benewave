@@ -67,6 +67,11 @@ double GetRoadSpeedFactor(BicycleRouteFactors const & factors, std::optional<Hig
   }
 }
 
+double GetRoadPenaltyEtaFactor(RoadPenalty::Type type)
+{
+  return type == RoadPenalty::Type::ControlledJunction ? 0.0 : 1.0;
+}
+
 std::string DebugPrint(BicycleRouteProfile profile)
 {
   switch (profile)

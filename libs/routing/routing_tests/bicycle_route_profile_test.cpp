@@ -90,8 +90,14 @@ UNIT_TEST(BicycleRouteProfile_SignalPenalty)
   ProfileGuard guard(BicycleRouteProfile::FewSignals);
   TEST_EQUAL(estimator->GetRoadPenaltyFactor(Purpose::Weight, RoadPenalty::Type::ControlledJunction), 4.0, ());
   TEST_EQUAL(estimator->GetRoadPenaltyFactor(Purpose::Weight, RoadPenalty::Type::Gate), 1.0, ());
-  // Travel times stay honest.
-  TEST_EQUAL(estimator->GetRoadPenaltyFactor(Purpose::ETA, RoadPenalty::Type::ControlledJunction), 1.0, ());
+  // Travel times do not depend on the profile; the app adds the waits at signals itself.
+  for (auto const profile : kProfiles)
+  {
+    SetBicycleRouteProfile(profile);
+    TEST_EQUAL(estimator->GetRoadPenaltyFactor(Purpose::ETA, RoadPenalty::Type::ControlledJunction), 0.0, ());
+    TEST_EQUAL(estimator->GetRoadPenaltyFactor(Purpose::ETA, RoadPenalty::Type::UncontrolledJunction), 1.0, ());
+    TEST_EQUAL(estimator->GetRoadPenaltyFactor(Purpose::ETA, RoadPenalty::Type::Gate), 1.0, ());
+  }
 }
 
 UNIT_TEST(BicycleRouteProfile_TurnPenalty)

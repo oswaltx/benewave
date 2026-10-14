@@ -12,11 +12,13 @@ import androidx.core.app.NotificationCompat
 import app.organicmaps.sdk.Framework
 import app.organicmaps.sdk.Router
 import app.organicmaps.sdk.routing.RoutingController
+import app.organicmaps.sdk.routing.RoutingInfo
 import dev.greenwave.shared.algorithm.SpeedOptions
 import dev.greenwave.shared.algorithm.SpeedRangeKmh
 import dev.greenwave.shared.data.RandomTrafficTimingGenerator
 import dev.greenwave.shared.geo.LatLng
 import dev.greenwave.shared.guidance.RouteAdvice
+import dev.greenwave.shared.guidance.SignalWait
 import dev.greenwave.shared.geo.distanceAlongPath
 import dev.greenwave.shared.geo.bearingDegrees
 import dev.greenwave.shared.geo.distanceMeters
@@ -92,6 +94,8 @@ object GreenWaveController {
         val advice: RouteAdvice.Advice?,
         /** Of [learnedCount], lights whose timing comes from a live source (Hamburg). */
         val liveCount: Int = 0,
+        /** Expected waits at the lights still ahead, included in the arrival time (see [adjustedTime]). */
+        val signalWait: SignalWait.Summary? = null,
     )
 
     @Volatile private var route: Route? = null
@@ -103,6 +107,10 @@ object GreenWaveController {
     private const val LIVE_BATCH = 8
     /** Learned lights of [route] (main thread copy of [learnedPositions]). */
     @Volatile private var routeLearned: Set<LatLng> = emptySet()
+    /** Expected wait per intersection of [route], for the arrival time (empty until its lights are known). */
+    @Volatile private var signalWaits: List<SignalWait.Wait> = emptyList()
+    /** How far along [route] the rider is; 0 while planning. */
+    @Volatile private var progressMeters = 0.0
     @Volatile var lightsStatus: LightsStatus = LightsStatus.NO_ROUTE
         private set
 
@@ -227,6 +235,7 @@ object GreenWaveController {
         val appContext = context.applicationContext
         this.appContext = appContext
         settings = GreenWaveSettings(appContext).also { it.routeMode.activate() }
+        RoutingInfo.timeAdjuster = RoutingInfo.TimeAdjuster { adjustedTime(it) }
         worker.execute {
             store = StopEventStore(appContext).also { loggedStops = it.all().size }
             lightEvents = LightEventStore(appContext)
@@ -248,6 +257,7 @@ object GreenWaveController {
         if (geometry.pointCount < 2 || controller.lastRouterType != Router.Bicycle) {
             val wasActive = route != null
             route = null
+            signalWaits = emptyList()
             if (wasActive) Framework.nativeClearGreenWaveMarks()
             lightsStatus = LightsStatus.NO_ROUTE
             requestedRevision = -1
@@ -259,6 +269,8 @@ object GreenWaveController {
         failedAttempts = 0
         val path = geometry.mJunctions.map { LatLng(latitude = it.mLat, longitude = it.mLon) }
         route = Route(path = path, trafficLights = emptyList())
+        signalWaits = emptyList()
+        progressMeters = 0.0
         lightsStatus = LightsStatus.LOADING
         val revision = geometry.mRevision
         val suggestion = suggestedRouteJson(path, controller.cachedRoutingInfo?.totalTimeInSeconds)
@@ -415,10 +427,12 @@ object GreenWaveController {
         val liveNow = lightPositions.count { it in live }
         val positions = lightPositions
         val withData = lightsWithData(positions)
+        val waits = SignalWait.along(Route(path = path, trafficLights = lights), learnedSet)
         main.post {
             if (revision == requestedRevision) {
                 route = Route(path = path, trafficLights = lights)
                 routeLearned = learnedSet
+                signalWaits = waits
                 learnedCount = count
                 liveCount = liveNow
                 showMarks(positions.map { it to markState(it, learnedSet, live.keys, withData) })
@@ -431,8 +445,10 @@ object GreenWaveController {
      * screen off). Feeds the stop detector on bicycle routes only.
      */
     fun onRideLocation(location: Location) {
-        if (route == null || settings?.loggingEnabled == false) return
+        val current = route ?: return
         val update = location.toUpdate()
+        progressMeters = distanceAlongPath(current.path, update.position)
+        if (settings?.loggingEnabled == false) return
         val revision = requestedRevision
         val fix = Location(location)
         worker.execute {
@@ -1083,7 +1099,22 @@ object GreenWaveController {
         if (location == null || lightsStatus != LightsStatus.READY) {
             return State(lightsStatus, current.trafficLights.size, learnedCount, null, liveCount)
         }
-        val advice = RouteAdvice.advice(current, routeLearned, location.toUpdate(), speedRange)
-        return State(LightsStatus.READY, current.trafficLights.size, learnedCount, advice, liveCount)
+        val update = location.toUpdate()
+        progressMeters = distanceAlongPath(current.path, update.position)
+        val advice = RouteAdvice.advice(current, routeLearned, update, speedRange)
+        val wait = SignalWait.ahead(signalWaits, progressMeters)
+        return State(LightsStatus.READY, current.trafficLights.size, learnedCount, advice, liveCount, wait)
+    }
+
+    /**
+     * Remaining time of a bicycle route with the expected waits at the lights ahead
+     * (David 14.10.): learned or live programs where known, else [SignalWait.DEFAULT_WAIT_SEC].
+     * The router's bicycle time leaves signals out for this. Unchanged for other route types;
+     * until the route's lights are loaded it holds no signal waits. Any thread.
+     */
+    fun adjustedTime(routerSec: Int): Int {
+        if (route == null) return routerSec
+        val wait = SignalWait.ahead(signalWaits, progressMeters).waitSec
+        return (routerSec + wait).roundToInt()
     }
 }

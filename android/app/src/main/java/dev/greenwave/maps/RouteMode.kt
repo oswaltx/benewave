@@ -20,5 +20,9 @@ internal enum class RouteMode(val nativeId: Int, val label: String, val descript
 
     companion object {
         fun fromName(name: String?): RouteMode = entries.firstOrNull { it.name == name } ?: STANDARD
+
+        /** At app start, before CoMaps restores a saved route. */
+        @JvmStatic
+        fun activateSaved(context: android.content.Context) = GreenWaveSettings(context).routeMode.activate()
     }
 }

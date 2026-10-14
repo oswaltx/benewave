@@ -661,8 +661,8 @@ public:
 
   double GetRoadPenaltyFactor(Purpose purpose, RoadPenalty::Type type) const override
   {
-    if (purpose != Purpose::Weight)
-      return 1.0;
+    if (purpose == Purpose::ETA)
+      return GetRoadPenaltyEtaFactor(type);
     return routing::GetRoadPenaltyFactor(GetBicycleRouteFactors(GetBicycleRouteProfile()), type);
   }
 

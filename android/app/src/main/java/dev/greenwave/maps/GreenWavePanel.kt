@@ -122,12 +122,20 @@ class GreenWavePanel @JvmOverloads constructor(
         detail.text = small
     }
 
-    private fun learnedSuffix(state: GreenWaveController.State): String =
-        when {
-            state.learnedCount == 0 -> ""
-            state.liveCount > 0 -> "\n${state.learnedCount}/${state.lightCount} bekannt, ${state.liveCount} live"
-            else -> "\n${state.learnedCount}/${state.lightCount} gelernt"
+    private fun learnedSuffix(state: GreenWaveController.State): String {
+        val learned = when {
+            state.learnedCount == 0 -> null
+            state.liveCount > 0 -> "${state.learnedCount}/${state.lightCount} bekannt, ${state.liveCount} live"
+            else -> "${state.learnedCount}/${state.lightCount} gelernt"
         }
+        // Part of the arrival time; unknown lights count a fixed estimate each.
+        val wait = state.signalWait?.takeIf { it.lights > 0 }?.let {
+            val sec = it.waitSec
+            "Warten an Ampeln ~" + if (sec < 90) "${(sec / 10).roundToInt() * 10} s" else "${(sec / 60).roundToInt()} min"
+        }
+        val parts = listOfNotNull(learned, wait)
+        return if (parts.isEmpty()) "" else "\n" + parts.joinToString(" · ")
+    }
 
     private fun formatDistance(meters: Double): String =
         if (meters < 1000) "${(meters / 10).roundToInt() * 10} m" else "%.1f km".format(meters / 1000)

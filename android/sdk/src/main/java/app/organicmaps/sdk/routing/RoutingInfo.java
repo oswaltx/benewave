@@ -62,6 +62,16 @@ public final class RoutingInfo
   public final Distance distToTurn;
   // Time in seconds to target (end point of route).
   public final int totalTimeInSeconds;
+
+  // greenWave: adjusts the remaining time, e.g. by the expected waits at traffic lights
+  // (GreenWaveController). Called from the constructor on any thread; must be cheap.
+  public interface TimeAdjuster
+  {
+    int adjust(int totalTimeInSeconds);
+  }
+
+  @Nullable
+  public static volatile TimeAdjuster timeAdjuster;
   // Current street name.
   public final String currentStreet;
   // The next street name.
@@ -125,7 +135,8 @@ public final class RoutingInfo
     this.nextStreetRoadShields = nextStreetRoadShields;
     this.nextNextStreet = nextNextStreet;
     this.nextNextStreetRoadShields = nextNextStreetRoadShields;
-    this.totalTimeInSeconds = totalTime;
+    final TimeAdjuster adjuster = timeAdjuster;
+    this.totalTimeInSeconds = adjuster == null ? totalTime : adjuster.adjust(totalTime);
     this.completionPercent = completionPercent;
     this.carDirection = CarDirection.values()[vehicleTurnOrdinal];
     this.nextCarDirection = CarDirection.values()[vehicleNextTurnOrdinal];

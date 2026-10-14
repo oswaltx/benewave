@@ -16,6 +16,7 @@ import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.FileProvider
 import app.organicmaps.BuildConfig
 import app.organicmaps.sdk.bookmarks.data.BookmarkManager
+import app.organicmaps.sdk.Router
 import app.organicmaps.sdk.routing.RoutingController
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import dev.greenwave.shared.algorithm.SpeedRangeKmh
@@ -108,7 +109,8 @@ internal object GreenWaveDialogs {
                 mode.activate()
                 dialog.dismiss()
                 val routing = RoutingController.get()
-                if (routing.isPlanning && routing.isBuilt && !routing.isNavigating) {
+                val bicycle = routing.lastRouterType == Router.Bicycle
+                if (bicycle && routing.isPlanning && routing.isBuilt && !routing.isNavigating) {
                     routing.rebuildLastRoute()
                 } else {
                     Toast.makeText(activity, "${mode.label}: gilt ab der nächsten Routenberechnung", Toast.LENGTH_LONG).show()
