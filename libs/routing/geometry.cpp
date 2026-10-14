@@ -144,7 +144,8 @@ private:
 }  // namespace
 
 // RoadGeometry ------------------------------------------------------------------------------------
-RoadGeometry::RoadGeometry(bool oneWay, double weightSpeedKMpH, double etaSpeedKMpH, Points const & points)
+RoadGeometry::RoadGeometry(bool oneWay, double weightSpeedKMpH, double etaSpeedKMpH, Points const & points,
+                           std::optional<HighwayType> highwayType)
   : m_forwardSpeed{weightSpeedKMpH, etaSpeedKMpH}
   , m_backwardSpeed(m_forwardSpeed)
   , m_isOneWay(oneWay)
@@ -163,6 +164,7 @@ RoadGeometry::RoadGeometry(bool oneWay, double weightSpeedKMpH, double etaSpeedK
     m_junctions.emplace_back(mercator::ToLatLon(point), geometry::kDefaultAltitudeMeters);
 
   m_distances.resize(count - 1, -1);
+  m_highwayType = highwayType;
 }
 
 void RoadGeometry::Load(VehicleModelInterface const & vehicleModel, FeatureType & feature,

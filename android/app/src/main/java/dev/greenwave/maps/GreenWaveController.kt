@@ -226,7 +226,7 @@ object GreenWaveController {
         initialized = true
         val appContext = context.applicationContext
         this.appContext = appContext
-        settings = GreenWaveSettings(appContext)
+        settings = GreenWaveSettings(appContext).also { it.routeMode.activate() }
         worker.execute {
             store = StopEventStore(appContext).also { loggedStops = it.all().size }
             lightEvents = LightEventStore(appContext)

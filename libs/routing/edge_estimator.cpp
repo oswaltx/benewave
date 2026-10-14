@@ -1,5 +1,6 @@
 #include "routing/edge_estimator.hpp"
 
+#include "routing/bicycle_route_profile.hpp"
 #include "routing/geometry.hpp"
 #include "routing/latlon_with_altitude.hpp"
 #include "routing/segment.hpp"
@@ -658,7 +659,24 @@ public:
     UNREACHABLE();
   }
 
+  double GetRoadPenaltyFactor(Purpose purpose, RoadPenalty::Type type) const override
+  {
+    if (purpose != Purpose::Weight)
+      return 1.0;
+    return routing::GetRoadPenaltyFactor(GetBicycleRouteFactors(GetBicycleRouteProfile()), type);
+  }
+
   double CalcSegmentWeight(Segment const & segment, RoadGeometry const & road, Purpose purpose) const override
+  {
+    double const weight = CalcBicycleSegment(segment, road, purpose);
+    if (purpose != Purpose::Weight)
+      return weight;
+    // greenWave route profile: a road class with much car traffic looks slower (factor <= 1).
+    return weight / GetRoadSpeedFactor(GetBicycleRouteFactors(GetBicycleRouteProfile()), road.GetHighwayType());
+  }
+
+private:
+  double CalcBicycleSegment(Segment const & segment, RoadGeometry const & road, Purpose purpose) const
   {
     return CalcClimbSegment(purpose, segment, road,
                             [purpose, this](double speedMpS, double tangent, geometry::Altitude altitude)
@@ -719,6 +737,9 @@ double BicycleEstimator::GetTurnPenalty(Purpose purpose, double angle, RoadGeome
   auto const extra_penalty = turn_crosses_traffic ? 2.0 : 1.0;
   auto const result = fabs(angle) * penalty * extra_penalty;
 
+  // greenWave route profile, e.g. fewer turns for long straight stretches.
+  if (purpose == Purpose::Weight)
+    return result * GetBicycleRouteFactors(GetBicycleRouteProfile()).m_turn;
   return result;
 }
 

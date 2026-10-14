@@ -16,6 +16,7 @@ import androidx.appcompat.widget.SwitchCompat
 import androidx.core.content.FileProvider
 import app.organicmaps.BuildConfig
 import app.organicmaps.sdk.bookmarks.data.BookmarkManager
+import app.organicmaps.sdk.routing.RoutingController
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import dev.greenwave.shared.algorithm.SpeedRangeKmh
 import dev.greenwave.shared.geo.LatLng
@@ -81,6 +82,9 @@ internal object GreenWaveDialogs {
             },
             "Meine Fahrten" to { showRides(activity) },
             "Ampeldaten" to { showLightData(activity) },
+            "Routenmodus: ${GreenWaveController.settings()?.routeMode?.label ?: RouteMode.STANDARD.label}" to {
+                showRouteMode(activity)
+            },
             "Einstellungen" to { showSettings(activity) },
         )
         if (tracks.isNotEmpty()) items.add("Aufzeichnungen teilen (${TrackFile.count(activity)})" to { shareTracks(activity, tracks) })
@@ -89,6 +93,28 @@ internal object GreenWaveDialogs {
         MaterialAlertDialogBuilder(activity)
             .setTitle("greenWave")
             .setItems(items.map { it.first }.toTypedArray()) { _, which -> items[which].second() }
+            .show()
+    }
+
+    private fun showRouteMode(activity: Activity) {
+        val settings = GreenWaveController.settings() ?: return
+        val modes = RouteMode.entries
+        val rows = modes.map { "${it.label}\n${it.description}" }.toTypedArray()
+        MaterialAlertDialogBuilder(activity)
+            .setTitle("Routenmodus (Fahrrad)")
+            .setSingleChoiceItems(rows, modes.indexOf(settings.routeMode)) { dialog, which ->
+                val mode = modes[which]
+                settings.routeMode = mode
+                mode.activate()
+                dialog.dismiss()
+                val routing = RoutingController.get()
+                if (routing.isPlanning && routing.isBuilt && !routing.isNavigating) {
+                    routing.rebuildLastRoute()
+                } else {
+                    Toast.makeText(activity, "${mode.label}: gilt ab der nächsten Routenberechnung", Toast.LENGTH_LONG).show()
+                }
+            }
+            .setNegativeButton("Abbrechen", null)
             .show()
     }
 

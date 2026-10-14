@@ -24,6 +24,8 @@ set(SRC
   lanes/lanes_parser.hpp
   lanes/lanes_recommendation.cpp
   lanes/lanes_recommendation.hpp
+  bicycle_route_profile.cpp
+  bicycle_route_profile.hpp
   car_directions.cpp
   car_directions.hpp
   checkpoint_predictor.cpp

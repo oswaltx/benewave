@@ -22,6 +22,11 @@ internal class GreenWaveSettings(context: Context) {
         get() = prefs.getBoolean(KEY_AUTO, false)
         set(value) = prefs.edit().putBoolean(KEY_AUTO, value).apply()
 
+    /** How bicycle routes are chosen, see [RouteMode]. */
+    var routeMode: RouteMode
+        get() = RouteMode.fromName(prefs.getString(KEY_ROUTE_MODE, null))
+        set(value) = prefs.edit().putString(KEY_ROUTE_MODE, value.name).apply()
+
     /** Log stops and rides while navigating by bicycle (the data the cycles are learned from). */
     var loggingEnabled: Boolean
         get() = prefs.getBoolean(KEY_LOGGING, true)
@@ -103,6 +108,7 @@ internal class GreenWaveSettings(context: Context) {
         const val KEY_AUTO = "auto_profile"
         const val KEY_RUNS_RED = "runs_red"
         const val KEY_LOGGING = "logging_enabled"
+        const val KEY_ROUTE_MODE = "route_mode"
         const val DEFAULT_MIN = 10f
         const val DEFAULT_MAX = 25f
     }

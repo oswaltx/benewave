@@ -229,6 +229,8 @@ public class Framework
   public static native double[] nativeGreenWaveTrafficSignals(double minLat, double minLon, double maxLat, double maxLon);
   // greenWave: bicycle-usable ways in the box for map matching, see GreenWaveSignals.cpp for the layout.
   public static native double[] nativeGreenWaveWays(double minLat, double minLon, double maxLat, double maxLon);
+  // greenWave: route profile for bicycle routes from now on (BicycleRouteProfile value, see GreenWaveRouting.cpp).
+  public static native void nativeSetGreenWaveRouteProfile(int profile);
 
   @Nullable
   public static native final int[] nativeGenerateRouteAltitudeChartBits(int width, int height,

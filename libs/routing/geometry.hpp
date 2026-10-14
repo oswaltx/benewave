@@ -38,7 +38,8 @@ public:
 
   /// Used in tests.
   using Points = std::vector<m2::PointD>;
-  RoadGeometry(bool oneWay, double weightSpeedKMpH, double etaSpeedKMpH, Points const & points);
+  RoadGeometry(bool oneWay, double weightSpeedKMpH, double etaSpeedKMpH, Points const & points,
+               std::optional<HighwayType> highwayType = {});
 
   /// @param[in] altitudes May be nullptr.
   void Load(VehicleModelInterface const & vehicleModel, FeatureType & feature, geometry::Altitudes const * altitudes,

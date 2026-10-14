@@ -1,5 +1,6 @@
 #pragma once
 
+#include "routing/road_penalty.hpp"
 #include "routing/vehicle_mask.hpp"
 
 #include "routing_common/num_mwm_id.hpp"
@@ -52,6 +53,8 @@ public:
   virtual double GetTurnPenalty(Purpose purpose, double angle, RoadGeometry const & from_road,
                                 RoadGeometry const & to_road, bool is_left_hand_traffic = false) const = 0;
   virtual double GetFerryLandingPenalty(Purpose purpose) const = 0;
+  // greenWave: factor for the time penalty of |type| (traffic signals etc.), see BicycleRouteProfile.
+  virtual double GetRoadPenaltyFactor(Purpose /* purpose */, RoadPenalty::Type /* type */) const { return 1.0; }
 
   static std::shared_ptr<EdgeEstimator> Create(VehicleType vehicleType, double maxWeighSpeedKMpH,
                                                SpeedKMpH const & offroadSpeedKMpH,
