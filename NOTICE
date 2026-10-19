@@ -21,3 +21,12 @@ organizations and licensed in different ways:
 Please refer to their LICENCE, COPYING or NOTICE files for terms of use.
 Some icons files may be copyrighted by (C) 2020 My.com B.V. (Mail.Ru Group)
 See also `data/copyright.html` file for a full list of copyright notices.
+
+greenWave Maps
+Copyright 2026 David Oswalt
+This product is a modified version of CoMaps. greenWave changes (traffic light
+speed advice, light learning, ride history and related features) are mainly in
+`android/greenwave` and `android/app/src/main/java/dev/greenwave/maps`;
+see the git history from commit ed0482f26 onward for all modifications.
+It includes code ported from hmm-lib, Copyright (C) 2015-2016 BMW Car IT GmbH
+and BMW AG, licensed under the Apache License, Version 2.0.
