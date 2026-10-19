@@ -1,66 +1,41 @@
 # greenWave Maps
 
-**Offline bike navigation that tells you how fast to ride to catch the next traffic light on green.**
+greenWave Maps is an Android app for cyclists, built on [CoMaps](https://codeberg.org/comaps/comaps) (offline maps from OpenStreetMap). During navigation it suggests a speed so you reach the next traffic light while it is green. It is a fork with no connection to the CoMaps project.
 
-greenWave Maps is a fork of [CoMaps](https://codeberg.org/comaps/comaps), the
-community-driven, privacy-first offline maps app. It keeps everything CoMaps
-does (offline OpenStreetMap maps, navigation, no tracking) and adds a
-"green wave" assistant for cyclists. It is an independent project and not
-affiliated with or endorsed by CoMaps.
+The app is in beta and the interface is only in German so far. I test it on my own rides. It learns traffic light timings from rides, so a suggestion gets better the more often a light has been passed.
 
-> Status: beta, Android only, UI currently in German. Tested on real rides,
-> but traffic-light timing is learned, so recommendations improve over time.
+## What it adds to CoMaps
 
-## What greenWave adds
+- Two speed suggestions for the next light, a slower and a faster one, on the navigation screen and in the notification. For a light it hasn't learned yet it shows nothing.
+- It detects stops and green passes per direction, matches the GPS track to the road (Newson & Krumm HMM) and estimates each light's cycle from that.
+- In Hamburg it uses the city's open live traffic light data (SensorThings API).
+- Bike routing modes for long straight sections, few traffic lights, little car traffic or as few stops as possible. Arrival times include the expected waiting at lights.
+- A ride history with GPX tracks. It compares each ride with the route the navigation suggested and shows which of two routes between the same places is faster on average.
+- Tracking without navigation, with automatic bike detection.
+- A nerd mode where you calibrate a light by hand by tapping each time it switches.
+- Optional sharing of anonymous light events with a server you choose. It is off by default and no server is preset. Events go out once a week over Wi-Fi, without an account or GPS track, and lights near the start and end of each ride stay on the phone.
 
-- **Speed advice for the next light**: two speed options (slower / faster) in
-  the navigation screen and notification, so you arrive while it is green.
-  No advice for lights it does not know yet, instead of guessing.
-- **Learning traffic lights from your rides**: stops and green pass-throughs
-  are detected per direction, map-matched to the road (Newson & Krumm HMM) and
-  turned into cycle estimates with a built-in self-check.
-- **Live signal data where available**: the open SensorThings traffic light
-  feed of the City of Hamburg is used directly.
-- **Bike route modes**: long straights, few traffic lights, little car traffic,
-  or smooth riding; arrival times include expected waiting at lights.
-- **My rides**: ride list, GPX track on the map, comparison with the route the
-  navigation suggested, and which of two ways between the same places is
-  faster on average.
-- **Tracking without navigation**, bike detection and battery saving.
-- **Nerd mode**: calibrate a traffic light by hand by tapping on each switch
-  to green or red.
-- **Optional, opt-in sharing** of anonymised light events with a board server
-  you choose (weekly, Wi-Fi only, no account, no track, start and end of each
-  ride stay on the device). Off by default; no server is preset.
-
-The shared learning logic lives in a Kotlin Multiplatform module
-(`android/greenwave`, targets JVM and iOS) with its own tests. The Android
-integration is in `android/app/src/main/java/dev/greenwave/maps`.
+The learning logic is a Kotlin Multiplatform module in `android/greenwave` (JVM and iOS targets) with its own tests. The Android code is in `android/app/src/main/java/dev/greenwave/maps`.
 
 ## Building
 
-Build like CoMaps; see [INSTALL.md](INSTALL.md) and
-[README.comaps.md](README.comaps.md). The app uses its own application ID and
-name, so it installs next to CoMaps.
+Build it like CoMaps, see [INSTALL.md](INSTALL.md) and [README.comaps.md](README.comaps.md). The app has its own application ID, so it installs next to CoMaps.
 
-Run the greenWave logic tests:
+To run the tests of the learning logic:
 
 ```bash
 cd android && ./gradlew :greenwave:jvmTest
 ```
 
-## Data sources and credits
+## Data and credits
 
 - Map data © OpenStreetMap contributors (ODbL).
-- Live traffic light data Hamburg: Freie und Hansestadt Hamburg, Datenlizenz
-  Deutschland – Namensnennung 2.0 (tld.iot.hamburg.de).
-- Map matching based on [hmm-lib](https://github.com/bmwcarit/hmm-lib) by
-  BMW Car IT GmbH (Apache 2.0), ported to Kotlin.
-- Everything else: the CoMaps and Organic Maps contributors.
+- Live traffic light data Hamburg: Freie und Hansestadt Hamburg, Datenlizenz Deutschland Namensnennung 2.0 (tld.iot.hamburg.de).
+- The map matching is ported to Kotlin from [hmm-lib](https://github.com/bmwcarit/hmm-lib) by BMW Car IT GmbH (Apache 2.0).
+- The rest of the app is CoMaps, which is based on Organic Maps.
 
-greenWave code was written with AI assistance and reviewed by me. It is not
-intended for upstream contribution to CoMaps.
+Most of the greenWave code was written with AI assistance. It is not meant to be contributed back to CoMaps.
 
 ## License
 
-Apache License 2.0, like CoMaps. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Apache License 2.0 like CoMaps, see [LICENSE](LICENSE) and [NOTICE](NOTICE).
