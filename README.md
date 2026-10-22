@@ -1,8 +1,8 @@
-# greenWave Maps
+# beneWave
 
-greenWave Maps is an Android app for cyclists, built on [CoMaps](https://codeberg.org/comaps/comaps) (offline maps from OpenStreetMap). During navigation it suggests a speed so you reach the next traffic light while it is green. It is a fork with no connection to the CoMaps project.
+beneWave (formerly greenWave Maps) is an Android app for cyclists, built on [CoMaps](https://codeberg.org/comaps/comaps) (offline maps from OpenStreetMap). During navigation it suggests a speed so you reach the next traffic light while it is green. It is a fork with no connection to the CoMaps project. beneWave is one of the projects of bene, a non-profit association being founded in Cologne, next to [beneMap](https://benemap.org).
 
-The app is in beta and the interface is only in German so far. I test it on my own rides. It learns traffic light timings from rides, so a suggestion gets better the more often a light has been passed.
+The app is in beta and the interface is only in German so far. Inside the app it is still called greenWave Maps until the rename is done there. I test it on my own rides. It learns traffic light timings from rides, so a suggestion gets better the more often a light has been passed.
 
 ## What it adds to CoMaps
 
@@ -34,7 +34,7 @@ cd android && ./gradlew :greenwave:jvmTest
 - The map matching is ported to Kotlin from [hmm-lib](https://github.com/bmwcarit/hmm-lib) by BMW Car IT GmbH (Apache 2.0).
 - The rest of the app is CoMaps, which is based on Organic Maps.
 
-Most of the greenWave code was written with AI assistance. It is not meant to be contributed back to CoMaps.
+Most of the beneWave code was written with AI assistance. It is not meant to be contributed back to CoMaps.
 
 ## License
 
